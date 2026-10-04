@@ -205,10 +205,12 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			}
 		} else if s.cfg.CORSAllowOrigin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", s.cfg.CORSAllowOrigin)
+			w.Header().Set("Access-Control-Expose-Headers", "x-adverserial-receipt")
 			w.Header().Add("Vary", "Origin")
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type")
+				w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-adverserial-nonce")
+				w.Header().Set("Access-Control-Expose-Headers", "x-adverserial-receipt")
 				w.Header().Set("Access-Control-Max-Age", "300")
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -293,23 +295,33 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 
 	now := s.now().UTC().Truncate(time.Second)
 	expires := now.Add(receiptTTL)
+	workload := attestation.Workload{
+		PolicyID:      s.cfg.PolicyID,
+		ModelID:       s.cfg.ModelID,
+		ProxyVersion:  buildinfo.Version,
+		ComposeDigest: s.cfg.ComposeDigest,
+		ModelDigest:   s.cfg.ModelDigest,
+	}
+	gpu := s.gpuSnapshot()
+	tlsSPKI := attestation.SPKIHash(leaf)
+	stateDigest, err := attestation.AttestationStateDigest(workload, s.cfg.RuntimeDigest, tlsSPKI, s.signer.KeyID(), gpu)
+	if err != nil {
+		s.logger.Error("attestation state digest failed", "error", err.Error())
+		writeError(w, http.StatusInternalServerError, "attestation state unavailable")
+		return
+	}
 
 	evidence := attestation.BuildEvidence(attestation.EvidenceInput{
-		Nonce:         nonceParam,
-		IssuedAt:      now,
-		ExpiresAt:     expires,
-		QuoteHex:      quote.QuoteHex,
-		TLSSPKISHA256: attestation.SPKIHash(leaf),
-		ReceiptJWK:    s.signer.PublicJWK(),
-		Workload: attestation.Workload{
-			PolicyID:      s.cfg.PolicyID,
-			ModelID:       s.cfg.ModelID,
-			ProxyVersion:  buildinfo.Version,
-			ComposeDigest: s.cfg.ComposeDigest,
-			ModelDigest:   s.cfg.ModelDigest,
-		},
-		GPU: s.gpuSnapshot(),
-		Dev: s.cfg.DevMode,
+		Nonce:                  nonceParam,
+		IssuedAt:               now,
+		ExpiresAt:              expires,
+		QuoteHex:               quote.QuoteHex,
+		TLSSPKISHA256:          tlsSPKI,
+		ReceiptJWK:             s.signer.PublicJWK(),
+		AttestationStateDigest: stateDigest,
+		Workload:               workload,
+		GPU:                    gpu,
+		Dev:                    s.cfg.DevMode,
 	})
 
 	digest, err := canonjson.Digest(evidence)

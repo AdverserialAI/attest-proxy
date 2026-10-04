@@ -28,9 +28,12 @@ type EvidenceInput struct {
 	QuoteHex      string
 	TLSSPKISHA256 string // "sha256:<base64url>" of the TLS certificate SPKI
 	ReceiptJWK    map[string]any
-	Workload      Workload
-	GPU           GPUEvidence // zero value → gpu_evidence: null
-	Dev           bool
+	// AttestationStateDigest is a stable identity of the currently attested
+	// runtime state. Per-request receipts cite this exact value.
+	AttestationStateDigest string
+	Workload               Workload
+	GPU                    GPUEvidence // zero value → gpu_evidence: null
+	Dev                    bool
 }
 
 // ReportData builds the 64-byte TDX report_data field for the quote request.
@@ -76,14 +79,15 @@ func BuildEvidence(in EvidenceInput) map[string]any {
 		"model_digest":   in.Workload.ModelDigest,
 	}
 	ev := map[string]any{
-		"version":            1,
-		"nonce":              in.Nonce,
-		"issued_at":          in.IssuedAt.UTC().Format(time.RFC3339),
-		"expires_at":         in.ExpiresAt.UTC().Format(time.RFC3339),
-		"tdx_quote":          in.QuoteHex,
-		"tls_spki_sha256":    in.TLSSPKISHA256,
-		"receipt_pubkey_jwk": in.ReceiptJWK,
-		"workload":           workload,
+		"version":                  1,
+		"nonce":                    in.Nonce,
+		"issued_at":                in.IssuedAt.UTC().Format(time.RFC3339),
+		"expires_at":               in.ExpiresAt.UTC().Format(time.RFC3339),
+		"tdx_quote":                in.QuoteHex,
+		"tls_spki_sha256":          in.TLSSPKISHA256,
+		"receipt_pubkey_jwk":       in.ReceiptJWK,
+		"attestation_state_digest": in.AttestationStateDigest,
+		"workload":                 workload,
 		// NVIDIA GPU evidence: the cached NRAS EAT bundle produced by the
 		// collector sidecar (GPU_EVIDENCE_FILE), or null when absent.
 		"gpu_evidence":     nil,

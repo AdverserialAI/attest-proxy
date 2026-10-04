@@ -165,6 +165,9 @@ func TestAttestationEndToEnd(t *testing.T) {
 	if ev["dev"] != true {
 		t.Errorf("dev flag = %v", ev["dev"])
 	}
+	if state, ok := ev["attestation_state_digest"].(string); !ok || !strings.HasPrefix(state, "sha256:") {
+		t.Errorf("attestation_state_digest = %v, want sha256 fingerprint", ev["attestation_state_digest"])
+	}
 	if ev["gpu_evidence_ref"] != nil {
 		t.Errorf("gpu_evidence_ref = %v, want nil placeholder", ev["gpu_evidence_ref"])
 	}
