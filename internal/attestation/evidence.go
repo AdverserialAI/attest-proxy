@@ -22,10 +22,13 @@ type Workload struct {
 
 // EvidenceInput carries everything needed to build one evidence object.
 type EvidenceInput struct {
-	Nonce         string // client nonce, base64url, echoed verbatim
-	IssuedAt      time.Time
-	ExpiresAt     time.Time
-	QuoteHex      string
+	Nonce     string // client nonce, base64url, echoed verbatim
+	IssuedAt  time.Time
+	ExpiresAt time.Time
+	QuoteHex  string
+	// EventLog is the RTMR replay material returned with the quote. It enables
+	// a verifier to tie the signed TDX quote to the measured workload.
+	EventLog      any
 	TLSSPKISHA256 string // "sha256:<base64url>" of the TLS certificate SPKI
 	ReceiptJWK    map[string]any
 	// AttestationStateDigest is a stable identity of the currently attested
@@ -84,6 +87,7 @@ func BuildEvidence(in EvidenceInput) map[string]any {
 		"issued_at":                in.IssuedAt.UTC().Format(time.RFC3339),
 		"expires_at":               in.ExpiresAt.UTC().Format(time.RFC3339),
 		"tdx_quote":                in.QuoteHex,
+		"tdx_event_log":            in.EventLog,
 		"tls_spki_sha256":          in.TLSSPKISHA256,
 		"receipt_pubkey_jwk":       in.ReceiptJWK,
 		"attestation_state_digest": in.AttestationStateDigest,

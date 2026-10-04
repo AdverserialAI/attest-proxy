@@ -13,11 +13,11 @@ import (
 )
 
 // Quote is a TDX attestation quote plus the dstack event log (RTMR replay
-// material). EventLog is retained for future verifiers; v0 evidence carries
-// only the quote.
+// material). Both must be published: a quote signature alone does not let a
+// verifier reconstruct the measured workload.
 type Quote struct {
 	QuoteHex string
-	EventLog json.RawMessage
+	EventLog any
 }
 
 // QuoteSource produces a TDX quote binding the given 64-byte report_data.
@@ -90,7 +90,14 @@ func (c *DstackClient) Quote(ctx context.Context, reportData [64]byte) (Quote, e
 	if qr.Quote == "" {
 		return Quote{}, fmt.Errorf("dstack returned an empty quote")
 	}
-	return Quote{QuoteHex: qr.Quote, EventLog: qr.EventLog}, nil
+	if len(qr.EventLog) == 0 || string(qr.EventLog) == "null" {
+		return Quote{}, fmt.Errorf("dstack returned no event log")
+	}
+	var eventLog any
+	if err := json.Unmarshal(qr.EventLog, &eventLog); err != nil {
+		return Quote{}, fmt.Errorf("dstack returned an invalid event log: %w", err)
+	}
+	return Quote{QuoteHex: qr.Quote, EventLog: eventLog}, nil
 }
 
 // DevQuoteSource synthesizes a deterministic-binding, non-hardware quote for
@@ -111,6 +118,6 @@ func (DevQuoteSource) Quote(_ context.Context, reportData [64]byte) (Quote, erro
 	buf = append(buf, entropy[:]...)
 	return Quote{
 		QuoteHex: hex.EncodeToString(buf),
-		EventLog: json.RawMessage(`"dev-mode-synthetic-event-log"`),
+		EventLog: "dev-mode-synthetic-event-log",
 	}, nil
 }

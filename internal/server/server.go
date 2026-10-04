@@ -317,6 +317,7 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 		IssuedAt:               now,
 		ExpiresAt:              expires,
 		QuoteHex:               quote.QuoteHex,
+		EventLog:               quote.EventLog,
 		TLSSPKISHA256:          tlsSPKI,
 		ReceiptJWK:             s.signer.PublicJWK(),
 		AttestationStateDigest: stateDigest,

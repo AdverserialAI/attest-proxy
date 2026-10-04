@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,7 +16,14 @@ import (
 // serveFakeAgent runs an HTTP server on a unix socket and returns its path.
 func serveFakeAgent(t *testing.T, handler http.HandlerFunc) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "dstack.sock")
+	// macOS has a short Unix-domain socket path limit; Go's long test temp
+	// directory names otherwise make an unrelated test name change fail here.
+	dir, err := os.MkdirTemp("/tmp", "dstack-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "dstack.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -57,8 +65,8 @@ func TestDstackClientQuote(t *testing.T) {
 	if q.QuoteHex != "deadbeefcafe" {
 		t.Errorf("QuoteHex = %q", q.QuoteHex)
 	}
-	if string(q.EventLog) != `"el"` {
-		t.Errorf("EventLog = %s", q.EventLog)
+	if q.EventLog != "el" {
+		t.Errorf("EventLog = %#v", q.EventLog)
 	}
 
 	// The request must carry the hex of the full 64-byte report_data.
@@ -80,6 +88,17 @@ func TestDstackClientErrors(t *testing.T) {
 	if _, err := client.Quote(context.Background(), [64]byte{}); err == nil ||
 		!strings.Contains(err.Error(), "tdx module unavailable") {
 		t.Fatalf("expected agent error, got %v", err)
+	}
+}
+
+func TestDstackClientRejectsMissingEventLog(t *testing.T) {
+	sock := serveFakeAgent(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"quote":"deadbeefcafe"}`))
+	})
+	if _, err := NewDstackClient(sock).Quote(context.Background(), [64]byte{}); err == nil ||
+		!strings.Contains(err.Error(), "no event log") {
+		t.Fatalf("expected missing event log rejection, got %v", err)
 	}
 }
 

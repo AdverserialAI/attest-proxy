@@ -268,6 +268,9 @@ func TestAttestationEndToEnd(t *testing.T) {
 	if !strings.Contains(quoteHex, hex.EncodeToString(wantRD[:])) {
 		t.Errorf("tdx_quote does not embed the expected report_data binding")
 	}
+	if ev["tdx_event_log"] != "dev-mode-synthetic-event-log" {
+		t.Errorf("tdx_event_log = %#v, want published quote replay material", ev["tdx_event_log"])
+	}
 
 	// --- signing key is on the curve and matches the kid ---
 	derPub, err := x509.ParsePKIXPublicKey(srv.signer.PublicKeyDER())
