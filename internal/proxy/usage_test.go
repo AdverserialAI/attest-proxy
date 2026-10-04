@@ -9,12 +9,32 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/adverserial/attest-proxy/internal/billing"
 	"github.com/adverserial/attest-proxy/internal/gate"
 )
+
+// lockedBuffer makes the test logger safe when the proxy's request goroutine
+// finishes just after the client has consumed the response.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
 
 type recordSink struct {
 	events chan billing.UsageEvent
@@ -229,7 +249,7 @@ func TestTapContentNeverLogged(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	var logBuf bytes.Buffer
+	var logBuf lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	u, _ := url.Parse(upstream.URL)
 	sink := newRecordSink()
