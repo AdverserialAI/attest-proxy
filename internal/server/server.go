@@ -136,7 +136,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/attestation", s.handleAttestation)
 	mux.HandleFunc("/.well-known/adverserial-attestation", s.handleAttestation)
 	mux.HandleFunc("/healthz", s.handleHealthz)
-	mux.Handle("/", g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap)))
+	mux.Handle("/", g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap, s.cfg.UpstreamBearer)))
 
 	return proxy.Logging(s.logger, s.cors(s.hostRouter(mux)))
 }

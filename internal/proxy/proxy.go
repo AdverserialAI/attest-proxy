@@ -23,8 +23,19 @@ import (
 // New builds a streaming-safe reverse proxy to the upstream inference server.
 // aug and tap may be nil; aug injects confidential_verification metadata into
 // GET /v1/models, tap extracts usage counts from completion responses.
-func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *UsageTap) *httputil.ReverseProxy {
+func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *UsageTap, upstreamBearer ...string) *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(upstream)
+	if len(upstreamBearer) > 0 && upstreamBearer[0] != "" {
+		base := rp.Director
+		secret := upstreamBearer[0]
+		rp.Director = func(req *http.Request) {
+			base(req)
+			// A client entitlement is valid only at attest-proxy. SGLang sees
+			// a separate sealed loopback credential, never a customer key or
+			// billing token.
+			req.Header.Set("Authorization", "Bearer "+secret)
+		}
+	}
 	if aug != nil {
 		rp.Director = DirectorWrap(rp.Director)
 	}

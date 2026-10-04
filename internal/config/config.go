@@ -16,14 +16,15 @@ var canonicalModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}/[a-z0-9][
 
 // Config is the runtime configuration of the proxy.
 type Config struct {
-	ListenAddr    string // LISTEN_ADDR, default :8443
-	Upstream      string // UPSTREAM, default http://127.0.0.1:30000
-	ModelID       string // MODEL_ID, default lordx64/cyberglm
-	PolicyID      string // POLICY_ID
-	Endpoint      string // ENDPOINT — public base URL, echoed into receipt claims
-	ComposeDigest string // COMPOSE_DIGEST — sha256 of the dstack compose file
-	ModelDigest   string // MODEL_DIGEST — sha256 of the model artifact
-	RuntimeDigest string // RUNTIME_DIGEST — expected runtime measurement digest
+	ListenAddr     string // LISTEN_ADDR, default :8443
+	Upstream       string // UPSTREAM, default http://127.0.0.1:30000
+	UpstreamBearer string // UPSTREAM_BEARER_TOKEN — loopback inference credential
+	ModelID        string // MODEL_ID, default lordx64/cyberglm
+	PolicyID       string // POLICY_ID
+	Endpoint       string // ENDPOINT — public base URL, echoed into receipt claims
+	ComposeDigest  string // COMPOSE_DIGEST — sha256 of the dstack compose file
+	ModelDigest    string // MODEL_DIGEST — sha256 of the model artifact
+	RuntimeDigest  string // RUNTIME_DIGEST — expected runtime measurement digest
 
 	ReceiptIssuer   string // RECEIPT_ISSUER   → receipt claim iss
 	ReceiptAudience string // RECEIPT_AUDIENCE → receipt claim aud
@@ -103,6 +104,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		ListenAddr:      orDefault(getenv("LISTEN_ADDR"), ":8443"),
 		Upstream:        orDefault(getenv("UPSTREAM"), "http://127.0.0.1:30000"),
+		UpstreamBearer:  getenv("UPSTREAM_BEARER_TOKEN"),
 		ModelID:         orDefault(getenv("MODEL_ID"), "lordx64/cyberglm"),
 		PolicyID:        orDefault(getenv("POLICY_ID"), "adverserial-policy/dev"),
 		Endpoint:        orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai"),
@@ -162,6 +164,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			{"ENTITLEMENT_REPLAY_DIR", cfg.EntitlementReplayDir},
 			{"METER_SIGNING_SEED", cfg.MeterSigningSeed},
 			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
+			{"UPSTREAM_BEARER_TOKEN", cfg.UpstreamBearer},
 		} {
 			if required.value == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)

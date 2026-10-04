@@ -45,6 +45,7 @@ docker run --rm -p 8443:8443 \
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:8443` | TLS listen address |
 | `UPSTREAM` | `http://127.0.0.1:30000` | Inference server (loopback only) |
+| `UPSTREAM_BEARER_TOKEN` | _(empty)_ | Sealed SGLang-only credential. Required in `CONFIDENTIAL_MODE`; replaces the client entitlement before the upstream request. |
 | `MODEL_ID` | `lordx64/cyberglm` | Served model ID (receipt claim `model_id`) |
 | `POLICY_ID` | `adverserial-policy/dev` | Policy identifier from the public policy registry |
 | `ENDPOINT` | `https://api.adverserial.ai` | Public base URL (receipt claim `endpoint`) |
