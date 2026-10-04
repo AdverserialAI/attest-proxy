@@ -79,6 +79,10 @@ docker run --rm -p 8443:8443 \
 | `METER_ISSUER` | `https://cc-api.adverserial.ai` | Meter-event issuer. |
 | `METER_AUDIENCE` | `https://billing.adverserial.ai` | Meter-event audience. |
 | `METER_OUTBOX_DIR` | — | Persistent, private directory for signed meter retry records. |
+| `METER_URL` | — | Fixed `https://meter-ingress…` origin. Required in confidential mode; it must not point to Heroku billing. |
+| `METER_CLIENT_CERT_FILE` | — | Sealed CVM client certificate PEM for the meter-ingress mTLS link. |
+| `METER_CLIENT_KEY_FILE` | — | Sealed CVM client private-key PEM for the meter-ingress mTLS link. |
+| `METER_SERVER_CA_FILE` | — | CA PEM used to authenticate the dedicated meter-ingress TLS server. |
 | `CHAT_HOST` | _(empty = disabled)_ | Static-chat virtual host, e.g. `cc-chat.adverserial.ai` |
 | `CHAT_DOCROOT` | _(empty = disabled)_ | SPA docroot for `CHAT_HOST` (set both or neither) |
 | `GPU_EVIDENCE_FILE` | `/data/gpu-evidence.json` | Cached NRAS EAT bundle from the collector sidecar (embedded as `gpu_evidence`) |
@@ -298,17 +302,21 @@ must obtain a fresh entitlement rather than risk a second inference.
 
 After the response, the proxy signs a count-only JWS and first writes it to
 `METER_OUTBOX_DIR` with `O_EXCL`, `fsync`, and mode `0600`. It posts
-`{"meter":"<JWS>"}` to `POST {BILLING_URL}/cc/meter`. Billing verifies the
-proxy's pinned Ed25519 public key and settles the reservation idempotently.
-The file is deleted only after a 2xx response; otherwise it survives process
-and CVM restarts and is retried at boot and every 30 seconds. The event has
-only reservation ID, request ID, model, counts, timestamps, and signature —
-never content, identity, raw API key, or response hash.
+`{"meter":"<JWS>"}` only to `POST {METER_URL}/cc/meter`, using TLS 1.3 and the
+dedicated CVM client certificate. The separately deployed
+[`confidential-meter-ingress`](https://github.com/AdverserialAI/confidential-meter-ingress)
+validates that certificate and its optional SPKI pin, then forwards the
+unchanged envelope to its fixed billing URL. Billing requires the ingress
+header and verifies the proxy's pinned Ed25519 public key before idempotent
+settlement. The file is deleted only after a 2xx response; otherwise it
+survives process and CVM restarts and is retried at boot and every 30 seconds.
+The event has only reservation ID, request ID, model, counts, timestamps, and
+signature — never content, identity, raw API key, or response hash.
 
-This transport currently relies on the signed JWS because a Heroku dyno does
-not expose mTLS client-certificate verification to the billing application.
-An mTLS ingress in front of billing can be added later; it is a defense in
-depth layer and does not replace application signature verification.
+The ingress must be outside the CVM and its TLS session must reach that
+process un-terminated; an L7 CDN, Heroku dyno, or TLS-terminating proxy cannot
+authenticate the CVM client certificate. mTLS is network-origin defense in
+depth and does not replace signed-event verification at billing.
 
 ### Legacy counts-only usage tap
 

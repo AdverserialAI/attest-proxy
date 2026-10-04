@@ -279,17 +279,20 @@ func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
 	base := map[string]string{
 		"CONFIDENTIAL_MODE":      "1",
 		"AUTH_REQUIRED":          "0",
-		"BILLING_URL":            "https://billing.adverserial.ai",
 		"ENTITLEMENT_JWKS_JSON":  `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
 		"ENTITLEMENT_REPLAY_DIR": "/data/used-entitlements",
 		"METER_SIGNING_SEED":     seed,
 		"METER_OUTBOX_DIR":       "/data/meter-outbox",
+		"METER_URL":              "https://meter-ingress.adverserial.ai",
+		"METER_CLIENT_CERT_FILE": "/state/meter-tls/client.crt",
+		"METER_CLIENT_KEY_FILE":  "/state/meter-tls/client.key",
+		"METER_SERVER_CA_FILE":   "/state/meter-tls/ingress-ca.crt",
 		"UPSTREAM_BEARER_TOKEN":  "local-only-secret",
 	}
 	if _, err := FromEnv(func(k string) string { return base[k] }); err != nil {
 		t.Fatalf("complete confidential config: %v", err)
 	}
-	for _, missing := range []string{"BILLING_URL", "ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_SIGNING_SEED", "METER_OUTBOX_DIR", "UPSTREAM_BEARER_TOKEN"} {
+	for _, missing := range []string{"ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_SIGNING_SEED", "METER_OUTBOX_DIR", "METER_URL", "METER_CLIENT_CERT_FILE", "METER_CLIENT_KEY_FILE", "METER_SERVER_CA_FILE", "UPSTREAM_BEARER_TOKEN"} {
 		env := make(map[string]string, len(base))
 		for k, v := range base {
 			env[k] = v

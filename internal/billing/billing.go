@@ -12,17 +12,23 @@ package billing
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
 
 // Client talks to the billing service.
 type Client struct {
-	BaseURL      string // e.g. https://billing.adverserial.ai
+	BaseURL string // legacy billing URL, e.g. https://billing.adverserial.ai
+	// MeterURL is the distinct mTLS meter-ingress URL in confidential mode.
+	// It must terminate TLS at an ingress that verifies the CVM client cert.
+	MeterURL     string
 	WriterSecret string
 	HTTP         *http.Client // optional; default 15s timeout
 }
@@ -101,15 +107,19 @@ func (c *Client) PostUsage(ctx context.Context, ev UsageEvent) error {
 	return nil
 }
 
-// PostMeter sends a proxy-signed, count-only confidential meter JWS. This
-// intentionally uses a separate endpoint and no shared bearer credential:
-// billing verifies the Ed25519 signature against its configured proxy JWKS.
+// PostMeter sends a proxy-signed, count-only confidential meter JWS through
+// the separately deployed mTLS meter ingress. The ingress authenticates the
+// CVM client certificate; billing independently verifies the Ed25519 JWS.
 func (c *Client) PostMeter(ctx context.Context, token string) error {
 	body, err := json.Marshal(map[string]string{"meter": token})
 	if err != nil {
 		return err
 	}
-	url := strings.TrimRight(c.BaseURL, "/") + "/cc/meter"
+	baseURL := c.MeterURL
+	if baseURL == "" {
+		baseURL = c.BaseURL // retained only for non-confidential backwards compatibility
+	}
+	url := strings.TrimRight(baseURL, "/") + "/cc/meter"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -135,4 +145,30 @@ func (c *Client) post(ctx context.Context, path string, body []byte) (*http.Resp
 	req.Header.Set("Authorization", "Bearer "+c.WriterSecret)
 	req.Header.Set("Content-Type", "application/json")
 	return c.httpClient().Do(req)
+}
+
+// NewMutualTLSHTTPClient constructs the client used only for confidential
+// meter delivery. It validates the ingress server against the supplied CA and
+// presents a dedicated CVM certificate. The caller must use it only for the
+// fixed METER_URL; it is intentionally not a global transport.
+func NewMutualTLSHTTPClient(certFile, keyFile, serverCAFile string) (*http.Client, error) {
+	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load meter client certificate: %w", err)
+	}
+	pemBytes, err := os.ReadFile(serverCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read meter ingress CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("meter ingress CA contains no PEM certificate")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		RootCAs:      roots,
+		MinVersion:   tls.VersionTLS13,
+	}
+	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
 }

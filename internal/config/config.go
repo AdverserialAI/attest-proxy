@@ -92,6 +92,12 @@ type Config struct {
 	MeterIssuer            string // METER_ISSUER
 	MeterAudience          string // METER_AUDIENCE
 	MeterOutboxDir         string // METER_OUTBOX_DIR — persistent volume
+	// MeterURL is the externally deployed TLS-terminating meter ingress. In
+	// confidential mode it is mandatory and must not be the Heroku billing app.
+	MeterURL            string // METER_URL — e.g. https://meter-ingress.adverserial.ai
+	MeterClientCertFile string // METER_CLIENT_CERT_FILE — sealed CVM client certificate PEM
+	MeterClientKeyFile  string // METER_CLIENT_KEY_FILE — sealed CVM client private key PEM
+	MeterServerCAFile   string // METER_SERVER_CA_FILE — meter ingress CA PEM
 
 	// Chat vhost: when both are set, requests with Host == ChatHost get the
 	// static SPA from ChatDocroot (API routes still reach the API handlers).
@@ -140,6 +146,10 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		MeterIssuer:            orDefault(getenv("METER_ISSUER"), "https://cc-api.adverserial.ai"),
 		MeterAudience:          orDefault(getenv("METER_AUDIENCE"), "https://billing.adverserial.ai"),
 		MeterOutboxDir:         getenv("METER_OUTBOX_DIR"),
+		MeterURL:               getenv("METER_URL"),
+		MeterClientCertFile:    getenv("METER_CLIENT_CERT_FILE"),
+		MeterClientKeyFile:     getenv("METER_CLIENT_KEY_FILE"),
+		MeterServerCAFile:      getenv("METER_SERVER_CA_FILE"),
 		ConfidentialActivation: orDefault(getenv("CONFIDENTIAL_ACTIVATION"), "pre-activation"),
 		ChatHost:               strings.ToLower(getenv("CHAT_HOST")),
 		ChatDocroot:            getenv("CHAT_DOCROOT"),
@@ -164,16 +174,23 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("AUTH_REQUIRED must be 0 when CONFIDENTIAL_MODE is enabled; raw API keys must not enter the CVM")
 		}
 		for _, required := range []struct{ name, value string }{
-			{"BILLING_URL", cfg.BillingURL},
 			{"ENTITLEMENT_JWKS_JSON", cfg.EntitlementJWKS},
 			{"ENTITLEMENT_REPLAY_DIR", cfg.EntitlementReplayDir},
 			{"METER_SIGNING_SEED", cfg.MeterSigningSeed},
 			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
+			{"METER_URL", cfg.MeterURL},
+			{"METER_CLIENT_CERT_FILE", cfg.MeterClientCertFile},
+			{"METER_CLIENT_KEY_FILE", cfg.MeterClientKeyFile},
+			{"METER_SERVER_CA_FILE", cfg.MeterServerCAFile},
 			{"UPSTREAM_BEARER_TOKEN", cfg.UpstreamBearer},
 		} {
 			if required.value == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
 			}
+		}
+		meterURL, err := url.Parse(cfg.MeterURL)
+		if err != nil || meterURL.Scheme != "https" || meterURL.Host == "" || meterURL.User != nil || meterURL.RawQuery != "" || meterURL.Fragment != "" || (meterURL.Path != "" && meterURL.Path != "/") {
+			return Config{}, fmt.Errorf("METER_URL must be an exact https://host URL")
 		}
 		if cfg.ConfidentialActivation != "pre-activation" && cfg.ConfidentialActivation != "active" {
 			return Config{}, fmt.Errorf("CONFIDENTIAL_ACTIVATION must be pre-activation or active")

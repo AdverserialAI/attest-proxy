@@ -88,10 +88,16 @@ func (s *Server) Handler() http.Handler {
 
 	var billingClient *billing.Client
 	if s.cfg.BillingURL != "" {
-		billingClient = &billing.Client{
-			BaseURL:      s.cfg.BillingURL,
-			WriterSecret: s.cfg.BillingWriterSecret,
+		billingClient = &billing.Client{BaseURL: s.cfg.BillingURL, WriterSecret: s.cfg.BillingWriterSecret}
+	}
+	if s.cfg.ConfidentialMode {
+		// Meter delivery has a distinct mTLS transport and fixed ingress URL.
+		// The legacy billing client is never used on the confidential prompt path.
+		mtlsClient, err := billing.NewMutualTLSHTTPClient(s.cfg.MeterClientCertFile, s.cfg.MeterClientKeyFile, s.cfg.MeterServerCAFile)
+		if err != nil {
+			panic("invalid confidential meter mTLS configuration: " + err.Error())
 		}
+		billingClient = &billing.Client{MeterURL: s.cfg.MeterURL, HTTP: mtlsClient}
 	}
 	g := &gate.Gate{
 		Billing:            billingClient,

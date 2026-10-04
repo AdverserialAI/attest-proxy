@@ -134,3 +134,18 @@ func TestConfidentialMeterContract(t *testing.T) {
 		t.Errorf("body=%v", got)
 	}
 }
+
+func TestConfidentialMeterUsesDedicatedIngressURL(t *testing.T) {
+	var gotPath string
+	ingress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ingress.Close()
+	if err := (&Client{BaseURL: "http://billing.invalid", MeterURL: ingress.URL}).PostMeter(context.Background(), "header.payload.signature"); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/cc/meter" {
+		t.Errorf("dedicated ingress path = %q", gotPath)
+	}
+}
