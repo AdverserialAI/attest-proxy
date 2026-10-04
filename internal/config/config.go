@@ -4,8 +4,15 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
+
+// canonicalModelID intentionally accepts only publisher/model identifiers.
+// Receipts, metering, and public discovery must not emit short aliases such
+// as "cyberglm": aliases belong, if needed, at an external compatibility
+// gateway before a request reaches the attested boundary.
+var canonicalModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}/[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // Config is the runtime configuration of the proxy.
 type Config struct {
@@ -127,6 +134,14 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("DEV_MODE: %w", err)
 	}
 	cfg.DevMode = dev
+	if !canonicalModelID.MatchString(cfg.ModelID) {
+		return Config{}, fmt.Errorf("MODEL_ID %q must use canonical publisher/model form", cfg.ModelID)
+	}
+	for _, id := range cfg.AttestedModels {
+		if !canonicalModelID.MatchString(id) {
+			return Config{}, fmt.Errorf("ATTESTED_MODELS entry %q must use canonical publisher/model form", id)
+		}
+	}
 
 	u, err := url.Parse(cfg.Upstream)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {

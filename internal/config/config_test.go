@@ -119,6 +119,26 @@ func TestBadUpstream(t *testing.T) {
 	}
 }
 
+func TestCanonicalModelIDsRequired(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"MODEL_ID": "cyberglm"},
+		{"MODEL_ID": "LordX64/cyberglm"},
+		{"ATTESTED_MODELS": "lordx64/cyberglm,cyberkimi"},
+	} {
+		if _, err := FromEnv(noAuth(func(k string) string { return env[k] })); err == nil {
+			t.Errorf("env %v should reject non-canonical model ids", env)
+		}
+	}
+	if _, err := FromEnv(noAuth(func(k string) string {
+		if k == "ATTESTED_MODELS" {
+			return "lordx64/cyberglm,lordx64/cyberkimi"
+		}
+		return ""
+	})); err != nil {
+		t.Fatalf("canonical model ids should parse: %v", err)
+	}
+}
+
 func TestNewFieldDefaults(t *testing.T) {
 	cfg, err := FromEnv(noAuth(func(string) string { return "" }))
 	if err != nil {
