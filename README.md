@@ -82,6 +82,8 @@ docker run --rm -p 8443:8443 \
 | `CHAT_HOST` | _(empty = disabled)_ | Static-chat virtual host, e.g. `cc-chat.adverserial.ai` |
 | `CHAT_DOCROOT` | _(empty = disabled)_ | SPA docroot for `CHAT_HOST` (set both or neither) |
 | `GPU_EVIDENCE_FILE` | `/data/gpu-evidence.json` | Cached NRAS EAT bundle from the collector sidecar (embedded as `gpu_evidence`) |
+| `NV_ATTESTATION_SERVICE_KEY` | — | Sealed NVIDIA remote-attestation service key; required by the collector, never by the proxy |
+| `GPU_EVIDENCE_MIN_GPU_COUNT` | `1` | Minimum number of independently attested GPU EATs; set to the deployment GPU count |
 
 ## Protocol
 

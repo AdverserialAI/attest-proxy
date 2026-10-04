@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 log = logging.getLogger("gpu-evidence-collector")
 
-NRAS_URL = "https://nras.attestation.nvidia.com/v3/attest/gpu"
+NRAS_URL = os.environ.get("NRAS_URL", "https://nras.attestation.nvidia.com/v4/attest/gpu")
 DEFAULT_OUT = "/data/gpu-evidence.json"
 DEFAULT_INTERVAL = 300  # seconds; NRAS round-trips take seconds, so 5 min is the freshness/cost tradeoff
 
@@ -66,7 +66,18 @@ def collect_bundle():
     """Run one collection + NRAS attestation round. Raises on failure."""
     from nv_attestation_sdk import attestation
 
+    service_key = os.environ.get("NV_ATTESTATION_SERVICE_KEY", "").strip()
+    if not service_key:
+        raise RuntimeError("NV_ATTESTATION_SERVICE_KEY is required for remote NVIDIA attestation")
+    try:
+        minimum_gpus = int(os.environ.get("GPU_EVIDENCE_MIN_GPU_COUNT", "1"))
+    except ValueError as exc:
+        raise RuntimeError("GPU_EVIDENCE_MIN_GPU_COUNT must be an integer") from exc
+    if minimum_gpus < 1:
+        raise RuntimeError("GPU_EVIDENCE_MIN_GPU_COUNT must be positive")
+
     client = attestation.Attestation(name="attest-proxy-collector")
+    client.set_service_key(service_key)
     client.add_verifier(
         attestation.Devices.GPU,
         attestation.Environment.REMOTE,
@@ -81,6 +92,8 @@ def collect_bundle():
     eat_jwts = extract_jwts(token)
     if not eat_jwts:
         raise RuntimeError("NRAS attestation succeeded but yielded no EAT JWTs")
+    if len(eat_jwts) < minimum_gpus:
+        raise RuntimeError(f"NRAS attestation returned {len(eat_jwts)} GPU EATs; expected at least {minimum_gpus}")
 
     # The SDK generates the NRAS round nonce per Attestation instance; expose
     # it when available, otherwise record a locally generated round id.
@@ -99,6 +112,8 @@ def collect_bundle():
         "verdict": "successful",
         "eat_jwts": eat_jwts,
         "source": "nv_attestation_sdk remote NRAS",
+        "nras_url": NRAS_URL,
+        "minimum_gpu_count": minimum_gpus,
     }
 
 

@@ -41,7 +41,11 @@ def make_fake_sdk(fail_attest=False, gpu_count=8):
             self.name = name
             self.verifier = None
 
+        def set_service_key(self, value):
+            self.service_key = value
+
         def add_verifier(self, device, env, url, token):
+            assert self.service_key == "test-nras-key"
             self.verifier = (device, env, url, token)
 
         def get_evidence(self, options=None):
@@ -75,6 +79,7 @@ def make_fake_sdk(fail_attest=False, gpu_count=8):
 
 @pytest.fixture
 def collector(monkeypatch):
+    monkeypatch.setenv("NV_ATTESTATION_SERVICE_KEY", "test-nras-key")
     pkg, sub = make_fake_sdk()
     monkeypatch.setitem(sys.modules, "nv_attestation_sdk", pkg)
     monkeypatch.setitem(sys.modules, "nv_attestation_sdk.attestation", sub)
@@ -96,6 +101,8 @@ def test_once_writes_bundle(collector, tmp_path, monkeypatch):
     assert all(j.startswith("eyJ") and j.count(".") == 2 for j in bundle["eat_jwts"])
     assert bundle["nonce"] == "ab" * 32
     assert bundle["source"] == "nv_attestation_sdk remote NRAS"
+    assert bundle["nras_url"] == "https://nras.attestation.nvidia.com/v4/attest/gpu"
+    assert bundle["minimum_gpu_count"] == 1
     # RFC3339 with Z suffix, parses back.
     from datetime import datetime
 
@@ -151,3 +158,19 @@ def test_empty_jwts_raises(collector, monkeypatch):
 def test_extract_jwts_shapes(collector):
     node = {"a": ["eyJ.x.y", "not-a-jwt", {"b": "eyJ.p.q"}], "c": 42, "d": None}
     assert collector.extract_jwts(node) == ["eyJ.x.y", "eyJ.p.q"]
+
+
+def test_missing_service_key_fails_closed(monkeypatch):
+    pkg, sub = make_fake_sdk()
+    monkeypatch.setitem(sys.modules, "nv_attestation_sdk", pkg)
+    monkeypatch.setitem(sys.modules, "nv_attestation_sdk.attestation", sub)
+    monkeypatch.delenv("NV_ATTESTATION_SERVICE_KEY", raising=False)
+    mod = load_collector()
+    with pytest.raises(RuntimeError, match="NV_ATTESTATION_SERVICE_KEY"):
+        mod.collect_bundle()
+
+
+def test_minimum_gpu_count_is_enforced(collector, monkeypatch):
+    monkeypatch.setenv("GPU_EVIDENCE_MIN_GPU_COUNT", "9")
+    with pytest.raises(RuntimeError, match="expected at least 9"):
+        collector.collect_bundle()

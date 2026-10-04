@@ -8,6 +8,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: {go-version: '1.23.x'}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check pytest
+      - run: python -m pytest tests/test_collector.py -q
       - run: go vet ./...
       - run: go test -race ./...
       - run: docker build -t attest-proxy:ci .
