@@ -105,7 +105,7 @@ func TestConfidentialGateUsesEntitlementOnce(t *testing.T) {
 	spki := "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	claims := map[string]any{"iss": "https://billing.adverserial.ai", "aud": "https://cc-api.adverserial.ai", "typ": "adverserial-confidential-entitlement/v1", "jti": "reservation-1", "model": "lordx64/cyberglm", "max_input_tokens": 4096, "max_output_tokens": 32, "max_requests": 1, "cnf": map[string]string{"tls_spki_sha256": spki}, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix()}
 	g := &Gate{
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Confidential: true,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Confidential: true, ConfidentialActive: true,
 		Entitlements: &entitlement.Validator{Keys: map[string]ed25519.PublicKey{"billing": pub}, Issuer: "https://billing.adverserial.ai", Audience: "https://cc-api.adverserial.ai", Now: func() time.Time { return now }},
 		Replay:       &entitlement.UsedStore{Dir: t.TempDir()}, ActiveSPKI: func() string { return spki },
 	}
@@ -135,6 +135,18 @@ func TestConfidentialGateUsesEntitlementOnce(t *testing.T) {
 	over := postChat(t, h, token, strings.Replace(body, "\"max_tokens\":32", "\"max_tokens\":33", 1))
 	if over.Code != http.StatusUnauthorized {
 		t.Fatalf("over-limit status=%d", over.Code)
+	}
+}
+
+func TestConfidentialPreActivationRejectsBeforeReadingPrompt(t *testing.T) {
+	g := &Gate{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Confidential: true}
+	h := g.Middleware(okHandler(t))
+	rec := postChat(t, h, "opaque-entitlement", `{"model":"lordx64/cyberglm","max_tokens":32,"messages":[{"role":"user","content":"must-not-be-read"}]}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("pre-activation status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "must-not-be-read") {
+		t.Fatal("pre-activation response reflected prompt content")
 	}
 }
 

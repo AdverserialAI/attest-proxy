@@ -79,15 +79,19 @@ type Config struct {
 	// local verification of a billing-signed, one-use entitlement. It must be
 	// enabled only after the CVM compose has the corresponding sealed secrets
 	// and persistent volumes. It never forwards a customer API key to SGLang.
-	ConfidentialMode     bool   // CONFIDENTIAL_MODE
-	EntitlementJWKS      string // ENTITLEMENT_JWKS_JSON — billing public keys
-	EntitlementIssuer    string // ENTITLEMENT_ISSUER
-	EntitlementAudience  string // ENTITLEMENT_AUDIENCE
-	EntitlementReplayDir string // ENTITLEMENT_REPLAY_DIR — persistent volume
-	MeterSigningSeed     string // METER_SIGNING_SEED — sealed Ed25519 seed
-	MeterIssuer          string // METER_ISSUER
-	MeterAudience        string // METER_AUDIENCE
-	MeterOutboxDir       string // METER_OUTBOX_DIR — persistent volume
+	ConfidentialMode bool // CONFIDENTIAL_MODE
+	// ConfidentialActivation keeps a newly provisioned CVM evidence-only until
+	// an independently verified, signed policy has been published. Allowed
+	// values are "pre-activation" and "active".
+	ConfidentialActivation string // CONFIDENTIAL_ACTIVATION
+	EntitlementJWKS        string // ENTITLEMENT_JWKS_JSON — billing public keys
+	EntitlementIssuer      string // ENTITLEMENT_ISSUER
+	EntitlementAudience    string // ENTITLEMENT_AUDIENCE
+	EntitlementReplayDir   string // ENTITLEMENT_REPLAY_DIR — persistent volume
+	MeterSigningSeed       string // METER_SIGNING_SEED — sealed Ed25519 seed
+	MeterIssuer            string // METER_ISSUER
+	MeterAudience          string // METER_AUDIENCE
+	MeterOutboxDir         string // METER_OUTBOX_DIR — persistent volume
 
 	// Chat vhost: when both are set, requests with Host == ChatHost get the
 	// static SPA from ChatDocroot (API routes still reach the API handlers).
@@ -126,19 +130,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		GandiZone: getenv("GANDI_ZONE"),
 		CertDir:   getenv("CERT_DIR"),
 
-		BillingURL:           getenv("BILLING_URL"),
-		BillingWriterSecret:  getenv("BILLING_WRITER_SECRET"),
-		EntitlementJWKS:      getenv("ENTITLEMENT_JWKS_JSON"),
-		EntitlementIssuer:    orDefault(getenv("ENTITLEMENT_ISSUER"), "https://billing.adverserial.ai"),
-		EntitlementAudience:  orDefault(getenv("ENTITLEMENT_AUDIENCE"), "https://cc-api.adverserial.ai"),
-		EntitlementReplayDir: getenv("ENTITLEMENT_REPLAY_DIR"),
-		MeterSigningSeed:     getenv("METER_SIGNING_SEED"),
-		MeterIssuer:          orDefault(getenv("METER_ISSUER"), "https://cc-api.adverserial.ai"),
-		MeterAudience:        orDefault(getenv("METER_AUDIENCE"), "https://billing.adverserial.ai"),
-		MeterOutboxDir:       getenv("METER_OUTBOX_DIR"),
-		ChatHost:             strings.ToLower(getenv("CHAT_HOST")),
-		ChatDocroot:          getenv("CHAT_DOCROOT"),
-		GPUEvidenceFile:      orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
+		BillingURL:             getenv("BILLING_URL"),
+		BillingWriterSecret:    getenv("BILLING_WRITER_SECRET"),
+		EntitlementJWKS:        getenv("ENTITLEMENT_JWKS_JSON"),
+		EntitlementIssuer:      orDefault(getenv("ENTITLEMENT_ISSUER"), "https://billing.adverserial.ai"),
+		EntitlementAudience:    orDefault(getenv("ENTITLEMENT_AUDIENCE"), "https://cc-api.adverserial.ai"),
+		EntitlementReplayDir:   getenv("ENTITLEMENT_REPLAY_DIR"),
+		MeterSigningSeed:       getenv("METER_SIGNING_SEED"),
+		MeterIssuer:            orDefault(getenv("METER_ISSUER"), "https://cc-api.adverserial.ai"),
+		MeterAudience:          orDefault(getenv("METER_AUDIENCE"), "https://billing.adverserial.ai"),
+		MeterOutboxDir:         getenv("METER_OUTBOX_DIR"),
+		ConfidentialActivation: orDefault(getenv("CONFIDENTIAL_ACTIVATION"), "pre-activation"),
+		ChatHost:               strings.ToLower(getenv("CHAT_HOST")),
+		ChatDocroot:            getenv("CHAT_DOCROOT"),
+		GPUEvidenceFile:        orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
 	}
 
 	authRequired, err := parseBoolDefault(getenv("AUTH_REQUIRED"), true)
@@ -169,6 +174,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			if required.value == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
 			}
+		}
+		if cfg.ConfidentialActivation != "pre-activation" && cfg.ConfidentialActivation != "active" {
+			return Config{}, fmt.Errorf("CONFIDENTIAL_ACTIVATION must be pre-activation or active")
 		}
 	}
 	if (cfg.ChatHost == "") != (cfg.ChatDocroot == "") {

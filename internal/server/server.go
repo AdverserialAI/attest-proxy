@@ -94,9 +94,10 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 	g := &gate.Gate{
-		Billing: billingClient,
-		Logger:  s.logger,
-		Enforce: s.cfg.AuthRequired,
+		Billing:            billingClient,
+		Logger:             s.logger,
+		Enforce:            s.cfg.AuthRequired,
+		ConfidentialActive: s.cfg.ConfidentialActivation == "active",
 	}
 	tap := &proxy.UsageTap{
 		Logger: s.logger,

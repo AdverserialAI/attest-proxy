@@ -64,9 +64,13 @@ type Gate struct {
 	// one model-scoped, channel-bound request authorization and are validated
 	// entirely inside the CVM. The replay store must live on persistent storage.
 	Confidential bool
-	Entitlements *entitlement.Validator
-	Replay       *entitlement.UsedStore
-	ActiveSPKI   func() string
+	// ConfidentialActive is false during evidence collection. In that state the
+	// proxy deliberately returns before it reads a request body, so a prompt
+	// cannot reach the CVM before the published policy is independently bound.
+	ConfidentialActive bool
+	Entitlements       *entitlement.Validator
+	Replay             *entitlement.UsedStore
+	ActiveSPKI         func() string
 
 	TTL time.Duration // verdict cache lifetime, default 60s
 
@@ -96,6 +100,10 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		}
 		if g.Confidential && (g.Entitlements == nil || g.Replay == nil || g.ActiveSPKI == nil) {
 			writeError(w, http.StatusServiceUnavailable, "confidential authorization not configured")
+			return
+		}
+		if g.Confidential && !g.ConfidentialActive {
+			writeError(w, http.StatusServiceUnavailable, "confidential inference is not active; attestation evidence collection is in progress")
 			return
 		}
 		if g.Enforce && g.Billing == nil {
