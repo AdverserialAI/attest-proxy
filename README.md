@@ -442,3 +442,7 @@ internal/receipt/        ES256 JWS minting, JWK, RFC 7638 thumbprints
 internal/server/         TLS + hot-swap holder, routing, chat vhost, attestation handler
 internal/buildinfo/      proxy version (ldflags-overridable)
 ```
+
+## Security
+
+Please report security vulnerabilities privately to [security@adverserial.ai](mailto:security@adverserial.ai). Do not open a public issue for a suspected vulnerability.
