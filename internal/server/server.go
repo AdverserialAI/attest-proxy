@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adverserial/attest-proxy/internal/attestation"
@@ -17,7 +18,9 @@ import (
 	"github.com/adverserial/attest-proxy/internal/buildinfo"
 	"github.com/adverserial/attest-proxy/internal/canonjson"
 	"github.com/adverserial/attest-proxy/internal/config"
+	"github.com/adverserial/attest-proxy/internal/entitlement"
 	"github.com/adverserial/attest-proxy/internal/gate"
+	"github.com/adverserial/attest-proxy/internal/meter"
 	"github.com/adverserial/attest-proxy/internal/proxy"
 	"github.com/adverserial/attest-proxy/internal/receipt"
 )
@@ -35,7 +38,9 @@ type Server struct {
 	gpu    *attestation.GPUBundleCache
 
 	// now is a test hook; production uses time.Now.
-	now func() time.Time
+	now         func() time.Time
+	meterOutbox *meter.Outbox
+	meterOnce   sync.Once
 }
 
 // New assembles the server. holder supplies the active serving certificate;
@@ -106,6 +111,26 @@ func (s *Server) Handler() http.Handler {
 	if billingClient != nil {
 		tap.Sink = billingClient // interface must stay nil when billing is off
 	}
+	if s.cfg.ConfidentialMode {
+		keys, err := entitlement.ParseJWKS(s.cfg.EntitlementJWKS)
+		if err != nil {
+			panic("invalid confidential entitlement JWKS: " + err.Error())
+		}
+		meterSigner, err := meter.NewSigner(s.cfg.MeterSigningSeed)
+		if err != nil {
+			panic("invalid confidential meter signer: " + err.Error())
+		}
+		replay := &entitlement.UsedStore{Dir: s.cfg.EntitlementReplayDir}
+		g.Confidential = true
+		g.Entitlements = &entitlement.Validator{Keys: keys, Issuer: s.cfg.EntitlementIssuer, Audience: s.cfg.EntitlementAudience}
+		g.Replay = replay
+		g.ActiveSPKI = func() string { return attestation.SPKIHash(s.holder.Leaf()) }
+		outbox := meter.Outbox{Dir: s.cfg.MeterOutboxDir, Poster: billingClient}
+		s.meterOutbox = &outbox
+		tap.Sink = nil // confidential mode never sends the legacy usage schema
+		tap.Meter = &proxy.ConfidentialMeterConfig{Signer: meterSigner, Issuer: s.cfg.MeterIssuer, Audience: s.cfg.MeterAudience, Outbox: outbox}
+		s.startMeterRetry()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/attestation", s.handleAttestation)
@@ -114,6 +139,29 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap)))
 
 	return proxy.Logging(s.logger, s.cors(s.hostRouter(mux)))
+}
+
+// startMeterRetry drains durable count-only records after boot and every 30
+// seconds. It is intentionally independent of request handling; a billing
+// outage leaves the file in place for retry rather than dropping usage.
+func (s *Server) startMeterRetry() {
+	if s.meterOutbox == nil {
+		return
+	}
+	s.meterOnce.Do(func() {
+		outbox := *s.meterOutbox
+		go func() {
+			for {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err := outbox.Flush(ctx)
+				cancel()
+				if err != nil && s.logger != nil {
+					s.logger.Warn("confidential meter retry deferred", "error", err.Error())
+				}
+				time.Sleep(30 * time.Second)
+			}
+		}()
+	})
 }
 
 // modelsAugmenter builds the /v1/models injector from config plus the current

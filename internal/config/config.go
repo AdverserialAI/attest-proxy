@@ -74,6 +74,20 @@ type Config struct {
 	// Required envs when on: BILLING_URL, BILLING_WRITER_SECRET.
 	AuthRequired bool // AUTH_REQUIRED
 
+	// ConfidentialMode replaces the legacy raw-API-key /auth/check gate with
+	// local verification of a billing-signed, one-use entitlement. It must be
+	// enabled only after the CVM compose has the corresponding sealed secrets
+	// and persistent volumes. It never forwards a customer API key to SGLang.
+	ConfidentialMode     bool   // CONFIDENTIAL_MODE
+	EntitlementJWKS      string // ENTITLEMENT_JWKS_JSON — billing public keys
+	EntitlementIssuer    string // ENTITLEMENT_ISSUER
+	EntitlementAudience  string // ENTITLEMENT_AUDIENCE
+	EntitlementReplayDir string // ENTITLEMENT_REPLAY_DIR — persistent volume
+	MeterSigningSeed     string // METER_SIGNING_SEED — sealed Ed25519 seed
+	MeterIssuer          string // METER_ISSUER
+	MeterAudience        string // METER_AUDIENCE
+	MeterOutboxDir       string // METER_OUTBOX_DIR — persistent volume
+
 	// Chat vhost: when both are set, requests with Host == ChatHost get the
 	// static SPA from ChatDocroot (API routes still reach the API handlers).
 	ChatHost    string // CHAT_HOST, e.g. cc-chat.adverserial.ai
@@ -110,11 +124,19 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		GandiZone: getenv("GANDI_ZONE"),
 		CertDir:   getenv("CERT_DIR"),
 
-		BillingURL:          getenv("BILLING_URL"),
-		BillingWriterSecret: getenv("BILLING_WRITER_SECRET"),
-		ChatHost:            strings.ToLower(getenv("CHAT_HOST")),
-		ChatDocroot:         getenv("CHAT_DOCROOT"),
-		GPUEvidenceFile:     orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
+		BillingURL:           getenv("BILLING_URL"),
+		BillingWriterSecret:  getenv("BILLING_WRITER_SECRET"),
+		EntitlementJWKS:      getenv("ENTITLEMENT_JWKS_JSON"),
+		EntitlementIssuer:    orDefault(getenv("ENTITLEMENT_ISSUER"), "https://billing.adverserial.ai"),
+		EntitlementAudience:  orDefault(getenv("ENTITLEMENT_AUDIENCE"), "https://cc-api.adverserial.ai"),
+		EntitlementReplayDir: getenv("ENTITLEMENT_REPLAY_DIR"),
+		MeterSigningSeed:     getenv("METER_SIGNING_SEED"),
+		MeterIssuer:          orDefault(getenv("METER_ISSUER"), "https://cc-api.adverserial.ai"),
+		MeterAudience:        orDefault(getenv("METER_AUDIENCE"), "https://billing.adverserial.ai"),
+		MeterOutboxDir:       getenv("METER_OUTBOX_DIR"),
+		ChatHost:             strings.ToLower(getenv("CHAT_HOST")),
+		ChatDocroot:          getenv("CHAT_DOCROOT"),
+		GPUEvidenceFile:      orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
 	}
 
 	authRequired, err := parseBoolDefault(getenv("AUTH_REQUIRED"), true)
@@ -122,8 +144,29 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("AUTH_REQUIRED: %w", err)
 	}
 	cfg.AuthRequired = authRequired
+	confidentialMode, err := parseBoolDefault(getenv("CONFIDENTIAL_MODE"), false)
+	if err != nil {
+		return Config{}, fmt.Errorf("CONFIDENTIAL_MODE: %w", err)
+	}
+	cfg.ConfidentialMode = confidentialMode
 	if cfg.AuthRequired && (cfg.BillingURL == "" || cfg.BillingWriterSecret == "") {
 		return Config{}, fmt.Errorf("BILLING_URL and BILLING_WRITER_SECRET are required when AUTH_REQUIRED is on (set AUTH_REQUIRED=0 to disable)")
+	}
+	if cfg.ConfidentialMode {
+		if cfg.AuthRequired {
+			return Config{}, fmt.Errorf("AUTH_REQUIRED must be 0 when CONFIDENTIAL_MODE is enabled; raw API keys must not enter the CVM")
+		}
+		for _, required := range []struct{ name, value string }{
+			{"BILLING_URL", cfg.BillingURL},
+			{"ENTITLEMENT_JWKS_JSON", cfg.EntitlementJWKS},
+			{"ENTITLEMENT_REPLAY_DIR", cfg.EntitlementReplayDir},
+			{"METER_SIGNING_SEED", cfg.MeterSigningSeed},
+			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
+		} {
+			if required.value == "" {
+				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
+			}
+		}
 	}
 	if (cfg.ChatHost == "") != (cfg.ChatDocroot == "") {
 		return Config{}, fmt.Errorf("CHAT_HOST and CHAT_DOCROOT must be set together")

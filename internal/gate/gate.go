@@ -24,6 +24,7 @@ import (
 
 	"github.com/adverserial/attest-proxy/internal/attestation"
 	"github.com/adverserial/attest-proxy/internal/billing"
+	"github.com/adverserial/attest-proxy/internal/entitlement"
 )
 
 // maxModelParseBody caps how much of a request body the gate buffers to
@@ -41,6 +42,7 @@ type RequestInfo struct {
 	RequestID       string
 	RequestNonce    string // base64url, echoed in the WP-7 receipt
 	RequestBodyHash string // "sha256:<base64url>" of the raw request body
+	ReservationID   string // opaque entitlement jti; never logged or forwarded
 }
 
 type ctxKey struct{}
@@ -57,6 +59,14 @@ type Gate struct {
 	Billing *billing.Client
 	Logger  *slog.Logger
 	Enforce bool
+
+	// Confidential replaces raw-key billing authorization. Entitlements carry
+	// one model-scoped, channel-bound request authorization and are validated
+	// entirely inside the CVM. The replay store must live on persistent storage.
+	Confidential bool
+	Entitlements *entitlement.Validator
+	Replay       *entitlement.UsedStore
+	ActiveSPKI   func() string
 
 	TTL time.Duration // verdict cache lifetime, default 60s
 
@@ -84,6 +94,10 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if g.Confidential && (g.Entitlements == nil || g.Replay == nil || g.ActiveSPKI == nil) {
+			writeError(w, http.StatusServiceUnavailable, "confidential authorization not configured")
+			return
+		}
 		if g.Enforce && g.Billing == nil {
 			// Fail closed: misconfiguration must never serve inference.
 			writeError(w, http.StatusServiceUnavailable, "authentication not configured")
@@ -91,7 +105,7 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		}
 
 		key, hasKey := bearerKey(r)
-		if g.Enforce && !hasKey {
+		if (g.Enforce || g.Confidential) && !hasKey {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
@@ -117,10 +131,11 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		r.ContentLength = int64(len(body))
 
 		var parsed struct {
-			Model string `json:"model"`
+			Model     string `json:"model"`
+			MaxTokens *int   `json:"max_tokens"`
 		}
 		_ = json.Unmarshal(body, &parsed) // malformed JSON → empty model
-		if g.Enforce && parsed.Model == "" {
+		if (g.Enforce || g.Confidential) && parsed.Model == "" {
 			writeError(w, http.StatusBadRequest, "request body must be JSON with a \"model\" field")
 			return
 		}
@@ -146,6 +161,36 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			RequestBodyHash: "sha256:" + base64.RawURLEncoding.EncodeToString(bodySum[:]),
 		}
 		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, info))
+
+		if g.Confidential {
+			// A byte-level tokenizer cannot emit more tokens than UTF-8 bytes;
+			// using the exact raw JSON body is therefore a conservative local
+			// input bound without parsing or retaining prompt content.
+			if parsed.MaxTokens == nil || *parsed.MaxTokens < 1 {
+				writeError(w, http.StatusBadRequest, "confidential requests require a positive max_tokens")
+				return
+			}
+			claims, err := g.Entitlements.Validate(key, parsed.Model, g.ActiveSPKI(), len(body), *parsed.MaxTokens)
+			if err != nil {
+				g.Logger.Info("confidential entitlement denied", "model", parsed.Model, "reason", err.Error())
+				writeError(w, http.StatusUnauthorized, "invalid, expired, replayed, or mismatched confidential entitlement")
+				return
+			}
+			used, err := g.Replay.Consume(claims)
+			if err != nil {
+				g.Logger.Error("confidential replay store failed", "error", err.Error())
+				writeError(w, http.StatusServiceUnavailable, "confidential authorization store unavailable")
+				return
+			}
+			if !used {
+				writeError(w, http.StatusUnauthorized, "confidential entitlement was already used")
+				return
+			}
+			info.ReservationID = claims.ID
+			info.KeyPrefix = "" // an entitlement is not a platform API key
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		if !g.Enforce {
 			next.ServeHTTP(w, r)

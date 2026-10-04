@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/base64"
+	"testing"
+)
 
 // noAuth disables the default-on auth gate for tests that predate it.
 func noAuth(next func(string) string) func(string) string {
@@ -268,5 +271,39 @@ func TestChatHostValidation(t *testing.T) {
 	}
 	if cfg.ChatHost != "cc-chat.adverserial.ai" || cfg.ChatDocroot != "/data/chat-dist" {
 		t.Errorf("chat vhost = %q %q", cfg.ChatHost, cfg.ChatDocroot)
+	}
+}
+
+func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
+	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	base := map[string]string{
+		"CONFIDENTIAL_MODE":      "1",
+		"AUTH_REQUIRED":          "0",
+		"BILLING_URL":            "https://billing.adverserial.ai",
+		"ENTITLEMENT_JWKS_JSON":  `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
+		"ENTITLEMENT_REPLAY_DIR": "/data/used-entitlements",
+		"METER_SIGNING_SEED":     seed,
+		"METER_OUTBOX_DIR":       "/data/meter-outbox",
+	}
+	if _, err := FromEnv(func(k string) string { return base[k] }); err != nil {
+		t.Fatalf("complete confidential config: %v", err)
+	}
+	for _, missing := range []string{"BILLING_URL", "ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_SIGNING_SEED", "METER_OUTBOX_DIR"} {
+		env := make(map[string]string, len(base))
+		for k, v := range base {
+			env[k] = v
+		}
+		delete(env, missing)
+		if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
+			t.Errorf("missing %s accepted", missing)
+		}
+	}
+	env := make(map[string]string, len(base))
+	for k, v := range base {
+		env[k] = v
+	}
+	env["AUTH_REQUIRED"] = "1"
+	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
+		t.Error("legacy raw-key gate accepted in confidential mode")
 	}
 }

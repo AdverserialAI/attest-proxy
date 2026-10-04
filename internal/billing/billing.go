@@ -101,6 +101,31 @@ func (c *Client) PostUsage(ctx context.Context, ev UsageEvent) error {
 	return nil
 }
 
+// PostMeter sends a proxy-signed, count-only confidential meter JWS. This
+// intentionally uses a separate endpoint and no shared bearer credential:
+// billing verifies the Ed25519 signature against its configured proxy JWKS.
+func (c *Client) PostMeter(ctx context.Context, token string) error {
+	body, err := json.Marshal(map[string]string{"meter": token})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(c.BaseURL, "/") + "/cc/meter"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("billing confidential meter write: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("billing confidential meter write status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (c *Client) post(ctx context.Context, path string, body []byte) (*http.Response, error) {
 	url := strings.TrimRight(c.BaseURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

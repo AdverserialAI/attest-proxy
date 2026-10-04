@@ -2,6 +2,9 @@ package gate
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"github.com/adverserial/attest-proxy/internal/billing"
+	"github.com/adverserial/attest-proxy/internal/entitlement"
 )
 
 // billingStub serves /auth/check with a programmable verdict and counts calls.
@@ -83,6 +87,56 @@ func postChat(t *testing.T, h http.Handler, key, body string) *httptest.Response
 const allowVerdict = `{"authenticated":true,"allowed":true,"reason":"ok","message":""}`
 const denyVerdict = `{"authenticated":false,"allowed":false,"reason":"bad_key","message":"unknown api key"}`
 const notAllowedVerdict = `{"authenticated":true,"allowed":false,"reason":"plan","message":"model not in plan"}`
+
+func signedEntitlement(t *testing.T, private ed25519.PrivateKey, kid string, claims map[string]any) string {
+	t.Helper()
+	header, _ := json.Marshal(map[string]string{"alg": "EdDSA", "kid": kid, "typ": "JWT"})
+	payload, _ := json.Marshal(claims)
+	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
+	return input + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, []byte(input)))
+}
+
+func TestConfidentialGateUsesEntitlementOnce(t *testing.T) {
+	pub, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_760_000_000, 0)
+	spki := "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	claims := map[string]any{"iss": "https://billing.adverserial.ai", "aud": "https://cc-api.adverserial.ai", "typ": "adverserial-confidential-entitlement/v1", "jti": "reservation-1", "model": "lordx64/cyberglm", "max_input_tokens": 4096, "max_output_tokens": 32, "max_requests": 1, "cnf": map[string]string{"tls_spki_sha256": spki}, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix()}
+	g := &Gate{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Confidential: true,
+		Entitlements: &entitlement.Validator{Keys: map[string]ed25519.PublicKey{"billing": pub}, Issuer: "https://billing.adverserial.ai", Audience: "https://cc-api.adverserial.ai", Now: func() time.Time { return now }},
+		Replay:       &entitlement.UsedStore{Dir: t.TempDir()}, ActiveSPKI: func() string { return spki },
+	}
+	token := signedEntitlement(t, private, "billing", claims)
+	body := `{"model":"lordx64/cyberglm","max_tokens":32,"messages":[{"role":"user","content":"never log this marker"}]}`
+	h := g.Middleware(okHandler(t))
+	first := postChat(t, h, token, body)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	var got struct {
+		Info RequestInfo `json:"info"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Info.ReservationID != "reservation-1" || got.Info.KeyPrefix != "" {
+		t.Errorf("info=%+v", got.Info)
+	}
+	second := postChat(t, h, token, body)
+	if second.Code != http.StatusUnauthorized {
+		t.Fatalf("replay status=%d", second.Code)
+	}
+	// A request with a maximum above its signed bound cannot consume the token.
+	claims["jti"] = "reservation-2"
+	token = signedEntitlement(t, private, "billing", claims)
+	over := postChat(t, h, token, strings.Replace(body, "\"max_tokens\":32", "\"max_tokens\":33", 1))
+	if over.Code != http.StatusUnauthorized {
+		t.Fatalf("over-limit status=%d", over.Code)
+	}
+}
 
 func TestGateAllowsAndPreservesBody(t *testing.T) {
 	stub := &billingStub{t: t, verdict: allowVerdict}

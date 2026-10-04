@@ -111,3 +111,26 @@ func TestUsageContract(t *testing.T) {
 		t.Errorf("usage has extra keys: %v", got)
 	}
 }
+
+func TestConfidentialMeterContract(t *testing.T) {
+	var got map[string]string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/cc/meter" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("confidential meter must not use shared bearer auth")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer stub.Close()
+	if err := (&Client{BaseURL: stub.URL, WriterSecret: "not-used"}).PostMeter(context.Background(), "header.payload.signature"); err != nil {
+		t.Fatal(err)
+	}
+	if got["meter"] != "header.payload.signature" || len(got) != 1 {
+		t.Errorf("body=%v", got)
+	}
+}

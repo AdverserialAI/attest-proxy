@@ -69,6 +69,15 @@ docker run --rm -p 8443:8443 \
 | `AUTH_REQUIRED` | `1` (on) | Gate `POST /v1/*` behind billing `/auth/check` |
 | `BILLING_URL` | — | Billing service base URL (required when `AUTH_REQUIRED` on) |
 | `BILLING_WRITER_SECRET` | — | Bearer token for billing writes (required when `AUTH_REQUIRED` on) |
+| `CONFIDENTIAL_MODE` | `0` | Enable local billing-entitlement verification. Requires `AUTH_REQUIRED=0`; raw customer API keys are rejected at this boundary. |
+| `ENTITLEMENT_JWKS_JSON` | — | Billing's public Ed25519 JWK set; parsed at startup and never fetched on the prompt path. |
+| `ENTITLEMENT_ISSUER` | `https://billing.adverserial.ai` | Required entitlement issuer. |
+| `ENTITLEMENT_AUDIENCE` | `https://cc-api.adverserial.ai` | Required entitlement audience. |
+| `ENTITLEMENT_REPLAY_DIR` | — | Persistent, private directory for atomically consuming one-use entitlement IDs. |
+| `METER_SIGNING_SEED` | — | Sealed 32-byte base64url Ed25519 seed for count-only meter records. Never commit it. |
+| `METER_ISSUER` | `https://cc-api.adverserial.ai` | Meter-event issuer. |
+| `METER_AUDIENCE` | `https://billing.adverserial.ai` | Meter-event audience. |
+| `METER_OUTBOX_DIR` | — | Persistent, private directory for signed meter retry records. |
 | `CHAT_HOST` | _(empty = disabled)_ | Static-chat virtual host, e.g. `cc-chat.adverserial.ai` |
 | `CHAT_DOCROOT` | _(empty = disabled)_ | SPA docroot for `CHAT_HOST` (set both or neither) |
 | `GPU_EVIDENCE_FILE` | `/data/gpu-evidence.json` | Cached NRAS EAT bundle from the collector sidecar (embedded as `gpu_evidence`) |
@@ -253,7 +262,7 @@ The `tls_spki_sha256` published in attestation evidence — and bound into the
 TDX quote `report_data` — always reflects the **active** serving certificate,
 across renewals (covered by `TestSPKIFollowsActiveCert`).
 
-### Auth gate (`POST /v1/*`)
+### Legacy auth gate (`POST /v1/*`)
 
 When `AUTH_REQUIRED` is on (the default), every `POST` under `/v1/`
 (`chat/completions`, `completions`, `responses`, `embeddings`, …) requires an
@@ -267,7 +276,38 @@ reason. The full client key is never logged — denials log the 8-char prefix
 only. `/attestation`, `/.well-known/*`, `/healthz`, and `GET /v1/models` stay
 unauthenticated.
 
-### Counts-only usage tap
+### Confidential entitlement gate and durable meter
+
+With `CONFIDENTIAL_MODE=1`, `AUTH_REQUIRED` **must** be `0`. The proxy
+rejects a normal `sk-` API key: the customer key is presented only to billing
+by the local gateway or browser entitlement exchange. Billing reserves a
+bounded request and returns a five-minute Ed25519 JWS with an opaque
+reservation ID, canonical model ID, input/output limits, one-use count, and
+the TLS SPKI fingerprint observed during client verification.
+
+The CVM verifies that JWS locally using `ENTITLEMENT_JWKS_JSON`. It checks the
+issuer, audience, expiry, canonical model, exact active TLS SPKI, body-byte
+upper bound, and requested `max_tokens`; it then atomically records the
+opaque reservation ID in `ENTITLEMENT_REPLAY_DIR` before calling SGLang.
+Consequently billing is not contacted on the prompt path and a captured
+entitlement cannot be replayed. A crash after consumption is safe: the client
+must obtain a fresh entitlement rather than risk a second inference.
+
+After the response, the proxy signs a count-only JWS and first writes it to
+`METER_OUTBOX_DIR` with `O_EXCL`, `fsync`, and mode `0600`. It posts
+`{"meter":"<JWS>"}` to `POST {BILLING_URL}/cc/meter`. Billing verifies the
+proxy's pinned Ed25519 public key and settles the reservation idempotently.
+The file is deleted only after a 2xx response; otherwise it survives process
+and CVM restarts and is retried at boot and every 30 seconds. The event has
+only reservation ID, request ID, model, counts, timestamps, and signature —
+never content, identity, raw API key, or response hash.
+
+This transport currently relies on the signed JWS because a Heroku dyno does
+not expose mTLS client-certificate verification to the billing application.
+An mTLS ingress in front of billing can be added later; it is a defense in
+depth layer and does not replace application signature verification.
+
+### Legacy counts-only usage tap
 
 For `POST /v1/chat/completions` and `/v1/responses`, after a 200 response
 completes the proxy posts one usage event to `POST {BILLING_URL}/usage`:
@@ -419,9 +459,6 @@ exists for client-integration development and is always marked `"dev": true`.
   and the proxy flags staleness past 10 min; policy-side min-freshness
   enforcement and per-request GPU binding remain WP-3 exit-criteria work.
 - **Rate limiting** on the attestation endpoint.
-- **Short-lived entitlement credentials**: the auth gate currently checks raw
-  API keys against billing per request (60 s cache); WP-9's signed, revocable
-  entitlement tokens verified locally in the CVM are the next step.
 - Pin base-image digests in the Dockerfile for reproducible releases (WP-1).
 - ACME: retry backoff on issuance failure, and CAA/account binding hardening.
 
@@ -436,7 +473,9 @@ internal/attestation/    evidence building, report_data, GPU bundle cache, dstac
 internal/billing/        billing service client (auth check + usage write)
 internal/canonjson/      TS-identical canonical JSON + digest
 internal/config/         env configuration
+internal/entitlement/    billing JWS verification + durable one-use replay store
 internal/gate/           /v1/ auth gate + request attribution extraction
+internal/meter/          signed count-only meter JWS + durable retry outbox
 internal/proxy/          reverse proxy, /v1/models augmenter, usage tap, no-content logging
 internal/receipt/        ES256 JWS minting, JWK, RFC 7638 thumbprints
 internal/server/         TLS + hot-swap holder, routing, chat vhost, attestation handler

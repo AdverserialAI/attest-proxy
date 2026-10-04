@@ -15,6 +15,7 @@ import (
 
 	"github.com/adverserial/attest-proxy/internal/billing"
 	"github.com/adverserial/attest-proxy/internal/gate"
+	"github.com/adverserial/attest-proxy/internal/meter"
 	"github.com/adverserial/attest-proxy/internal/receipt"
 )
 
@@ -44,6 +45,17 @@ type ReceiptConfig struct {
 	StateDigest func() (string, string)
 }
 
+// ConfidentialMeterConfig produces an authenticated, count-only billing
+// record for entitlement-authenticated requests. The durable outbox writes
+// before a background delivery attempt, so billing outages cannot turn into
+// untraceable/unsettled inference usage.
+type ConfidentialMeterConfig struct {
+	Signer   *meter.Signer
+	Issuer   string
+	Audience string
+	Outbox   meter.Outbox
+}
+
 // UsageTap extracts token counts from /v1/chat/completions and /v1/responses
 // responses, reports them to billing, and mints WP-7 per-request receipts.
 //
@@ -57,8 +69,9 @@ type ReceiptConfig struct {
 // remaining payload bytes to the stream hash — including the final "[DONE]"
 // sentinel, excluding the proxy-injected receipt chunk.
 type UsageTap struct {
-	Sink     UsageSink      // may be nil (billing disabled)
-	Receipts *ReceiptConfig // may be nil (receipts disabled)
+	Sink     UsageSink                // may be nil (billing disabled)
+	Receipts *ReceiptConfig           // may be nil (receipts disabled)
+	Meter    *ConfidentialMeterConfig // nil retains legacy usage event behavior
 	Logger   *slog.Logger
 
 	now func() time.Time // test hook
@@ -150,6 +163,32 @@ func (t *UsageTap) mintReceipt(info *gate.RequestInfo, responseHash string, usag
 
 // fire posts the usage event in the background with a short timeout.
 func (t *UsageTap) fire(info *gate.RequestInfo, u usageCounts) {
+	if t.Meter != nil && info.ReservationID != "" {
+		token, claims, err := meter.Build(t.Meter.Signer, info.ReservationID, info.RequestID,
+			info.Model, t.Meter.Issuer, t.Meter.Audience, u.Input, u.Cached, u.Output, t.nowFn().UTC())
+		if err != nil {
+			if t.Logger != nil {
+				t.Logger.Error("confidential meter signing failed", "request_id", info.RequestID, "error", err.Error())
+			}
+			return
+		}
+		if err := t.Meter.Outbox.Enqueue(token, claims); err != nil {
+			if t.Logger != nil {
+				t.Logger.Error("confidential meter persistence failed", "request_id", info.RequestID, "error", err.Error())
+			}
+			return
+		}
+		logger := t.Logger
+		outbox := t.Meter.Outbox
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := outbox.Flush(ctx); err != nil && logger != nil {
+				logger.Warn("confidential meter delivery deferred", "request_id", info.RequestID, "error", err.Error())
+			}
+		}()
+		return
+	}
 	if t.Sink == nil {
 		return
 	}
