@@ -325,6 +325,7 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 		QuoteHex:               quote.QuoteHex,
 		EventLog:               quote.EventLog,
 		TLSSPKISHA256:          tlsSPKI,
+		TLSSPKIDER:             leaf.RawSubjectPublicKeyInfo,
 		ReceiptJWK:             s.signer.PublicJWK(),
 		AttestationStateDigest: stateDigest,
 		Workload:               workload,

@@ -199,6 +199,9 @@ func TestAttestationEndToEnd(t *testing.T) {
 	if ev["tls_spki_sha256"] != wantSPKI {
 		t.Errorf("tls_spki_sha256 = %v, want %v", ev["tls_spki_sha256"], wantSPKI)
 	}
+	if got, ok := ev["tls_spki_der"].(string); !ok || got == "" {
+		t.Errorf("tls_spki_der = %v, want public SPKI DER", got)
+	}
 
 	// --- receipt: verify like verification.ts does ---
 	jwk, ok := ev["receipt_pubkey_jwk"].(map[string]any)

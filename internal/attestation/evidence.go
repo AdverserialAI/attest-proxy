@@ -30,7 +30,10 @@ type EvidenceInput struct {
 	// a verifier to tie the signed TDX quote to the measured workload.
 	EventLog      any
 	TLSSPKISHA256 string // "sha256:<base64url>" of the TLS certificate SPKI
-	ReceiptJWK    map[string]any
+	// TLSSPKIDER is the public DER SubjectPublicKeyInfo, included so an
+	// independent verifier can recompute the quote report_data binding.
+	TLSSPKIDER []byte
+	ReceiptJWK map[string]any
 	// AttestationStateDigest is a stable identity of the currently attested
 	// runtime state. Per-request receipts cite this exact value.
 	AttestationStateDigest string
@@ -89,6 +92,7 @@ func BuildEvidence(in EvidenceInput) map[string]any {
 		"tdx_quote":                in.QuoteHex,
 		"tdx_event_log":            in.EventLog,
 		"tls_spki_sha256":          in.TLSSPKISHA256,
+		"tls_spki_der":             base64.RawURLEncoding.EncodeToString(in.TLSSPKIDER),
 		"receipt_pubkey_jwk":       in.ReceiptJWK,
 		"attestation_state_digest": in.AttestationStateDigest,
 		"workload":                 workload,
