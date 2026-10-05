@@ -500,3 +500,25 @@ internal/buildinfo/      proxy version (ldflags-overridable)
 ## Security
 
 Please report security vulnerabilities privately to [security@adverserial.ai](mailto:security@adverserial.ai). Do not open a public issue for a suspected vulnerability.
+
+## Third-party protocol implementation
+
+The encrypted-body boundary uses the maintained [Tinfoil Encrypted HTTP Body
+Protocol reference implementation](https://github.com/tinfoilsh/encrypted-http-body-protocol)
+(EHBP, MIT licensed). It implements RFC 9180 HPKE, RFC 9458 key
+configuration, framed encrypted streaming responses, and response-key
+derivation. Adverserial binds the receiver public key configuration into its
+fresh attestation evidence before a client uses it; clients must not replace it
+with an independently fetched key.
+
+Generate the deployment-specific receiver identity only on an administrator
+workstation, writing it directly into protected storage:
+
+```sh
+go run ./cmd/generate-ehbp-identity --out "$HOME/.config/adverserial/ehbp-identity"
+chmod 600 "$HOME/.config/adverserial/ehbp-identity"
+```
+
+Copy the single file value into sealed `EHBP_IDENTITY_B64`; never commit or
+print it. The proxy publishes only its RFC 9458 public key configuration in
+fresh quote-bound evidence.

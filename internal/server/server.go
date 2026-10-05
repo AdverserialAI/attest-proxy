@@ -4,7 +4,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -23,6 +25,8 @@ import (
 	"github.com/adverserial/attest-proxy/internal/meter"
 	"github.com/adverserial/attest-proxy/internal/proxy"
 	"github.com/adverserial/attest-proxy/internal/receipt"
+	ehbpidentity "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+	ehbpprotocol "github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 // receiptTTL is the validity window of verification receipts (WP-3 freshness).
@@ -36,6 +40,7 @@ type Server struct {
 	signer *receipt.Signer
 	holder *CertHolder // active serving cert (self-signed or ACME, hot-swappable)
 	gpu    *attestation.GPUBundleCache
+	ehbp   *ehbpidentity.Identity
 
 	// now is a test hook; production uses time.Now.
 	now         func() time.Time
@@ -51,10 +56,15 @@ func New(
 	quotes attestation.QuoteSource,
 	signer *receipt.Signer,
 	holder *CertHolder,
+	ehbpIdentity ...*ehbpidentity.Identity,
 ) *Server {
 	var gpu *attestation.GPUBundleCache
 	if cfg.GPUEvidenceFile != "" {
 		gpu = &attestation.GPUBundleCache{Path: cfg.GPUEvidenceFile}
+	}
+	var receiver *ehbpidentity.Identity
+	if len(ehbpIdentity) > 0 {
+		receiver = ehbpIdentity[0]
 	}
 	return &Server{
 		cfg:    cfg,
@@ -63,6 +73,7 @@ func New(
 		signer: signer,
 		holder: holder,
 		gpu:    gpu,
+		ehbp:   receiver,
 		now:    time.Now,
 	}
 }
@@ -148,7 +159,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/attestation", s.handleAttestation)
 	mux.HandleFunc("/.well-known/adverserial-attestation", s.handleAttestation)
 	mux.HandleFunc("/healthz", s.handleHealthz)
-	mux.Handle("/", g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap, s.cfg.UpstreamBearer)))
+	api := g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap, s.cfg.UpstreamBearer))
+	if s.cfg.EHBPRequired {
+		if s.ehbp == nil {
+			panic("EHBP_REQUIRED without receiver key")
+		}
+		api = s.requireEHBP(s.ehbp.Middleware()(api))
+		mux.HandleFunc(ehbpprotocol.KeysPath, s.ehbp.ConfigHandler)
+	}
+	mux.Handle("/", api)
 
 	return proxy.Logging(s.logger, s.cors(s.hostRouter(mux)))
 }
@@ -217,12 +236,15 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			}
 		} else if s.cfg.CORSAllowOrigin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", s.cfg.CORSAllowOrigin)
-			w.Header().Set("Access-Control-Expose-Headers", "x-adverserial-receipt")
+			// Browser EHBP clients must be able to send the encapsulated request
+			// key and read the derived response nonce; otherwise cross-origin
+			// confidential streaming silently fails at the CORS boundary.
+			w.Header().Set("Access-Control-Expose-Headers", "x-adverserial-receipt, ehbp-response-nonce")
 			w.Header().Add("Vary", "Origin")
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-adverserial-nonce")
-				w.Header().Set("Access-Control-Expose-Headers", "x-adverserial-receipt")
+				w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-adverserial-nonce, ehbp-encapsulated-key")
+				w.Header().Set("Access-Control-Expose-Headers", "x-adverserial-receipt, ehbp-response-nonce")
 				w.Header().Set("Access-Control-Max-Age", "300")
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -261,12 +283,21 @@ func (s *Server) attestationStateDigest() (string, string) {
 		s.cfg.RuntimeDigest,
 		spki,
 		s.signer.KeyID(),
+		s.ehbpPublicKeySHA256(),
 		s.gpuSnapshot(),
 	)
 	if err != nil {
 		return spki, ""
 	}
 	return spki, digest
+}
+
+func (s *Server) ehbpPublicKeySHA256() string {
+	if s.ehbp == nil {
+		return ""
+	}
+	sum := sha256.Sum256(s.ehbp.MarshalPublicKey())
+	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -297,7 +328,24 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	leaf := s.holder.Leaf()
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	reportData := attestation.ReportData(nonceRaw, leaf.RawSubjectPublicKeyInfo, s.signer.PublicKeyDER())
+	var ehbpPublicKey []byte
+	var ehbpMetadata map[string]any
+	if s.ehbp != nil {
+		config, err := s.ehbp.MarshalConfig()
+		if err != nil {
+			s.logger.Error("EHBP configuration encoding failed", "error", err.Error())
+			writeError(w, http.StatusInternalServerError, "attestation state unavailable")
+			return
+		}
+		ehbpPublicKey = s.ehbp.MarshalPublicKey()
+		ehbpMetadata = map[string]any{
+			"protocol":          "ehbp-rfc9180-v1",
+			"key_config":        base64.RawURLEncoding.EncodeToString(config),
+			"public_key":        base64.RawURLEncoding.EncodeToString(ehbpPublicKey),
+			"public_key_sha256": s.ehbpPublicKeySHA256(),
+		}
+	}
+	reportData := attestation.ReportData(nonceRaw, leaf.RawSubjectPublicKeyInfo, s.signer.PublicKeyDER(), ehbpPublicKey)
 	quote, err := s.quotes.Quote(ctx, reportData)
 	if err != nil {
 		s.logger.Error("quote failed", "error", err.Error())
@@ -316,7 +364,7 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	}
 	gpu := s.gpuSnapshot()
 	tlsSPKI := attestation.SPKIHash(leaf)
-	stateDigest, err := attestation.AttestationStateDigest(workload, s.cfg.RuntimeDigest, tlsSPKI, s.signer.KeyID(), gpu)
+	stateDigest, err := attestation.AttestationStateDigest(workload, s.cfg.RuntimeDigest, tlsSPKI, s.signer.KeyID(), s.ehbpPublicKeySHA256(), gpu)
 	if err != nil {
 		s.logger.Error("attestation state digest failed", "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "attestation state unavailable")
@@ -331,6 +379,7 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 		EventLog:               quote.EventLog,
 		TLSSPKISHA256:          tlsSPKI,
 		TLSSPKIDER:             leaf.RawSubjectPublicKeyInfo,
+		EHBP:                   ehbpMetadata,
 		ReceiptJWK:             s.signer.PublicJWK(),
 		AttestationStateDigest: stateDigest,
 		Workload:               workload,

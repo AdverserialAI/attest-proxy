@@ -127,6 +127,13 @@ type Config struct {
 	// GPUEvidenceFile is the cached NRAS EAT bundle written by the collector
 	// sidecar; embedded in attestation evidence as gpu_evidence.
 	GPUEvidenceFile string // GPU_EVIDENCE_FILE, default /data/gpu-evidence.json
+
+	// EHBPRequired requires the standards-based EHBP encrypted-body transport
+	// for inference. EHBPIdentityB64 is a sealed base64url JSON identity from
+	// the MIT-licensed reference implementation; only attest-proxy in the CVM
+	// receives its private component.
+	EHBPRequired    bool   // EHBP_REQUIRED
+	EHBPIdentityB64 string // EHBP_IDENTITY_B64
 }
 
 // FromEnv reads configuration using getenv (pass os.Getenv in production).
@@ -178,6 +185,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ChatHost:               strings.ToLower(getenv("CHAT_HOST")),
 		ChatDocroot:            getenv("CHAT_DOCROOT"),
 		GPUEvidenceFile:        orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
+		EHBPIdentityB64:        getenv("EHBP_IDENTITY_B64"),
 	}
 
 	authRequired, err := parseBoolDefault(getenv("AUTH_REQUIRED"), true)
@@ -190,6 +198,14 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("CONFIDENTIAL_MODE: %w", err)
 	}
 	cfg.ConfidentialMode = confidentialMode
+	ehbpRequired, err := parseBoolDefault(getenv("EHBP_REQUIRED"), false)
+	if err != nil {
+		return Config{}, fmt.Errorf("EHBP_REQUIRED: %w", err)
+	}
+	cfg.EHBPRequired = ehbpRequired
+	if cfg.EHBPRequired && !cfg.ConfidentialMode {
+		return Config{}, fmt.Errorf("EHBP_REQUIRED requires CONFIDENTIAL_MODE=1")
+	}
 	if cfg.AuthRequired && (cfg.BillingURL == "" || cfg.BillingWriterSecret == "") {
 		return Config{}, fmt.Errorf("BILLING_URL and BILLING_WRITER_SECRET are required when AUTH_REQUIRED is on (set AUTH_REQUIRED=0 to disable)")
 	}
@@ -212,6 +228,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			if required.value == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
 			}
+		}
+		if cfg.EHBPRequired && cfg.EHBPIdentityB64 == "" {
+			return Config{}, fmt.Errorf("EHBP_IDENTITY_B64 is required when EHBP_REQUIRED is enabled")
 		}
 		meterURL, err := url.Parse(cfg.MeterURL)
 		if err != nil || meterURL.Scheme != "https" || meterURL.Host == "" || meterURL.User != nil || meterURL.RawQuery != "" || meterURL.Fragment != "" || (meterURL.Path != "" && meterURL.Path != "/") {

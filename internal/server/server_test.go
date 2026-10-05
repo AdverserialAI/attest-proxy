@@ -22,10 +22,12 @@ import (
 	"github.com/adverserial/attest-proxy/internal/canonjson"
 	"github.com/adverserial/attest-proxy/internal/config"
 	"github.com/adverserial/attest-proxy/internal/receipt"
+	ehbpclient "github.com/tinfoilsh/encrypted-http-body-protocol/client"
+	ehbpidentity "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 // newTestServer builds a DEV_MODE server with deterministic keys.
-func newTestServer(t *testing.T, cfg config.Config) (*Server, *httptest.Server) {
+func newTestServer(t *testing.T, cfg config.Config, ehbpIdentity ...*ehbpidentity.Identity) (*Server, *httptest.Server) {
 	t.Helper()
 	signer, err := receipt.NewSigner()
 	if err != nil {
@@ -41,11 +43,93 @@ func newTestServer(t *testing.T, cfg config.Config) (*Server, *httptest.Server) 
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(cfg, logger, attestation.DevQuoteSource{}, signer, holder)
+	srv := New(cfg, logger, attestation.DevQuoteSource{}, signer, holder, ehbpIdentity...)
 	srv.now = func() time.Time { return time.Unix(1759999000, 0) }
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return srv, ts
+}
+
+func TestEHBPReferenceTransportEncryptsBothDirections(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"private prompt"`) {
+			t.Fatalf("decrypted request not forwarded: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"private answer"}}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	identity, err := ehbpidentity.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.Upstream, cfg.AuthRequired, cfg.EHBPRequired = upstream.URL, false, true
+	_, ts := newTestServer(t, cfg, identity)
+
+	transport, err := ehbpclient.NewTransportWithIdentity(identity, ehbpclient.WithHTTPClient(ts.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: transport}
+	request, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", strings.NewReader(`{"model":"lordx64/cyberglm","messages":[{"role":"user","content":"private prompt"}],"stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(decrypted), "private answer") {
+		t.Fatalf("EHBP response = %d %s", response.StatusCode, decrypted)
+	}
+
+	fallback, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", strings.NewReader(`{"model":"lordx64/cyberglm"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback.Header.Set("Content-Type", "application/json")
+	fallbackResponse, err := ts.Client().Do(fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackResponse.Body.Close()
+	if fallbackResponse.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("plaintext fallback status = %d, want %d", fallbackResponse.StatusCode, http.StatusUpgradeRequired)
+	}
+}
+
+func TestEHBPCORSAllowsAndExposesProtocolHeaders(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSAllowOrigin = "https://cc-chat.adverserial.ai"
+	_, ts := newTestServer(t, cfg)
+	req, err := http.NewRequest(http.MethodOptions, ts.URL+"/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://cc-chat.adverserial.ai")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "ehbp-encapsulated-key") {
+		t.Fatalf("EHBP request header missing from CORS allow list: %q", got)
+	}
+	if got := resp.Header.Get("Access-Control-Expose-Headers"); !strings.Contains(strings.ToLower(got), "ehbp-response-nonce") {
+		t.Fatalf("EHBP response nonce missing from CORS expose list: %q", got)
+	}
 }
 
 func testConfig() config.Config {

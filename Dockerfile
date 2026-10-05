@@ -5,11 +5,14 @@
 #   $CERT_DIR             (dstack volume — ACME account key + certs, when
 #                          ACME_DOMAINS is configured)
 
-FROM golang:1.23-bookworm@sha256:167053a2bb901972bf2c1611f8f52c44d5fe7e762e5cab213708d82c421614db AS build
+# Go 1.26 provides the RFC 9180 HPKE implementation required by the
+# standards-based EHBP reference transport.
+FROM golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS build
 WORKDIR /src
 
-# No go.sum: this module is stdlib-only by invariant.
-COPY go.mod ./
+# EHBP is the pinned MIT-licensed reference implementation used by the
+# browser, SDK and proxy; copy both module files for deterministic builds.
+COPY go.mod go.sum ./
 COPY cmd/ cmd/
 COPY internal/ internal/
 

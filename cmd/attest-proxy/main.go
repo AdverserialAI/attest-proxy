@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/adverserial/attest-proxy/internal/config"
 	"github.com/adverserial/attest-proxy/internal/receipt"
 	"github.com/adverserial/attest-proxy/internal/server"
+	ehbpidentity "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 func main() {
@@ -81,7 +83,19 @@ func run(logger *slog.Logger) error {
 		quotes = attestation.NewDstackClient(cfg.DstackSocket)
 	}
 
-	srv := server.New(cfg, logger, quotes, signer, holder)
+	var ehbpReceiver *ehbpidentity.Identity
+	if cfg.EHBPRequired {
+		identityJSON, decodeErr := base64.RawURLEncoding.DecodeString(cfg.EHBPIdentityB64)
+		if decodeErr != nil {
+			return fmt.Errorf("decode EHBP_IDENTITY_B64: %w", decodeErr)
+		}
+		ehbpReceiver, err = ehbpidentity.Import(identityJSON)
+		if err != nil {
+			return fmt.Errorf("load EHBP identity: %w", err)
+		}
+	}
+
+	srv := server.New(cfg, logger, quotes, signer, holder, ehbpReceiver)
 
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddr,

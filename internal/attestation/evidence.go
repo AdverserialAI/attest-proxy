@@ -33,6 +33,10 @@ type EvidenceInput struct {
 	// TLSSPKIDER is the public DER SubjectPublicKeyInfo, included so an
 	// independent verifier can recompute the quote report_data binding.
 	TLSSPKIDER []byte
+	// EHBP is the public receiver key for encrypted HTTP request and response
+	// bodies. When present it is bound into the fresh TDX quote alongside TLS
+	// and receipt keys, so a verifier can reject a substituted HPKE receiver.
+	EHBP       map[string]any
 	ReceiptJWK map[string]any
 	// AttestationStateDigest is a stable identity of the currently attested
 	// runtime state. Per-request receipts cite this exact value.
@@ -46,19 +50,28 @@ type EvidenceInput struct {
 //
 // Byte order (protocol-fixed, must stay in sync with the published spec):
 //
-//	report_data[0:32]  = SHA-256(nonce_raw || tls_spki_der || receipt_spki_der)
+//	report_data[0:32]  = SHA-256("adverserial-attestation-v2\\x00" || nonce_raw || tls_spki_der || receipt_spki_der || ehbp_receiver_pubkey)
 //	report_data[32:64] = zero padding
 //
 // where nonce_raw is the base64url-decoded client nonce, tls_spki_der is the
 // DER-encoded PKIX SubjectPublicKeyInfo of the in-enclave TLS public key, and
-// receipt_spki_der is the same encoding of the receipt-signing public key.
+// receipt_spki_der is the same encoding of the receipt-signing public key;
+// ehbp_receiver_pubkey is the raw X25519 public key used for encrypted bodies.
 // This binds hardware evidence to the exact TLS key terminating the client's
-// connection and to the key that signs the verification receipt (WP-4).
-func ReportData(nonceRaw, tlsSPKIDER, receiptSPKIDER []byte) [64]byte {
+// connection, receipt key, and encrypted-body receiver key (WP-4).
+func ReportData(nonceRaw, tlsSPKIDER, receiptSPKIDER []byte, ehbpPublicKeys ...[]byte) [64]byte {
+	var ehbpPublicKey []byte
+	if len(ehbpPublicKeys) > 0 {
+		ehbpPublicKey = ehbpPublicKeys[0]
+	}
 	h := sha256.New()
+	// Domain separation is necessary because v2 binds an additional receiver
+	// key. It also prevents a v1 quote from being misinterpreted as v2 proof.
+	h.Write([]byte("adverserial-attestation-v2\x00"))
 	h.Write(nonceRaw)
 	h.Write(tlsSPKIDER)
 	h.Write(receiptSPKIDER)
+	h.Write(ehbpPublicKey)
 	var out [64]byte
 	copy(out[:32], h.Sum(nil))
 	return out
@@ -101,6 +114,9 @@ func BuildEvidence(in EvidenceInput) map[string]any {
 		"gpu_evidence":     nil,
 		"gpu_evidence_ref": nil,
 	}
+	if in.EHBP != nil {
+		ev["ehbp"] = in.EHBP
+	}
 	if in.GPU.Bundle != nil {
 		ev["gpu_evidence"] = in.GPU.Bundle
 		ev["gpu_evidence_ref"] = "nras-eat-bundle"
@@ -129,19 +145,20 @@ func BuildEvidence(in EvidenceInput) map[string]any {
 // evidence freshness flips. It is deliberately NOT a per-request evidence
 // digest (no nonce, no quote): per-request freshness comes from the TDX
 // quote at /attestation, per-request binding from the receipt hashes.
-func AttestationStateDigest(w Workload, runtimeDigest, tlsSPKIHash, receiptKID string, gpu GPUEvidence) (string, error) {
+func AttestationStateDigest(w Workload, runtimeDigest, tlsSPKIHash, receiptKID, ehbpPublicKeySHA256 string, gpu GPUEvidence) (string, error) {
 	state := map[string]any{
-		"compose_digest":        w.ComposeDigest,
-		"model_digest":          w.ModelDigest,
-		"model_id":              w.ModelID,
-		"policy_id":             w.PolicyID,
-		"proxy_version":         w.ProxyVersion,
-		"runtime_digest":        runtimeDigest,
-		"tls_spki_sha256":       tlsSPKIHash,
-		"receipt_kid":           receiptKID,
-		"gpu_evidence_present":  gpu.Bundle != nil,
-		"gpu_evidence_fresh_at": gpu.FreshAt,
-		"gpu_evidence_stale":    gpu.Stale,
+		"compose_digest":         w.ComposeDigest,
+		"model_digest":           w.ModelDigest,
+		"model_id":               w.ModelID,
+		"policy_id":              w.PolicyID,
+		"proxy_version":          w.ProxyVersion,
+		"runtime_digest":         runtimeDigest,
+		"tls_spki_sha256":        tlsSPKIHash,
+		"receipt_kid":            receiptKID,
+		"ehbp_public_key_sha256": ehbpPublicKeySHA256,
+		"gpu_evidence_present":   gpu.Bundle != nil,
+		"gpu_evidence_fresh_at":  gpu.FreshAt,
+		"gpu_evidence_stale":     gpu.Stale,
 	}
 	return canonjson.Digest(state)
 }
