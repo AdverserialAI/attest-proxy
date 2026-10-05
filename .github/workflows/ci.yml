@@ -16,3 +16,4 @@ jobs:
       - run: go test -race ./...
       - run: docker build -t attest-proxy:ci .
       - run: docker build -f Dockerfile.collector -t gpu-evidence-collector:ci .
+      - run: docker build -f Dockerfile.measurer -t model-measurer:ci .

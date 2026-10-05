@@ -2,8 +2,10 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -13,6 +15,7 @@ import (
 // as "cyberglm": aliases belong, if needed, at an external compatibility
 // gateway before a request reaches the attested boundary.
 var canonicalModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}/[a-z0-9][a-z0-9._-]{0,127}$`)
+var sha256Digest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // Config is the runtime configuration of the proxy.
 type Config struct {
@@ -24,7 +27,10 @@ type Config struct {
 	Endpoint       string // ENDPOINT — public base URL, echoed into receipt claims
 	ComposeDigest  string // COMPOSE_DIGEST — sha256 of the dstack compose file
 	ModelDigest    string // MODEL_DIGEST — sha256 of the model artifact
-	RuntimeDigest  string // RUNTIME_DIGEST — immutable runtime image digest; TDX event log binds the complete compose
+	// ModelManifestFile is written by the isolated read-only model measurer.
+	// When set, its validated digest becomes ModelDigest before the proxy starts.
+	ModelManifestFile string // MODEL_MANIFEST_FILE
+	RuntimeDigest     string // RUNTIME_DIGEST — immutable runtime image digest; TDX event log binds the complete compose
 
 	ReceiptIssuer   string // RECEIPT_ISSUER   → receipt claim iss
 	ReceiptAudience string // RECEIPT_AUDIENCE → receipt claim aud
@@ -127,6 +133,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		Endpoint:           orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai"),
 		ComposeDigest:      getenv("COMPOSE_DIGEST"),
 		ModelDigest:        getenv("MODEL_DIGEST"),
+		ModelManifestFile:  getenv("MODEL_MANIFEST_FILE"),
 		RuntimeDigest:      getenv("RUNTIME_DIGEST"),
 		ReceiptIssuer:      orDefault(getenv("RECEIPT_ISSUER"), "https://verify.adverserial.ai"),
 		ReceiptAudience:    orDefault(getenv("RECEIPT_AUDIENCE"), "cc-chat.adverserial.ai"),
@@ -180,6 +187,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	if cfg.ConfidentialMode {
 		if cfg.AuthRequired {
 			return Config{}, fmt.Errorf("AUTH_REQUIRED must be 0 when CONFIDENTIAL_MODE is enabled; raw API keys must not enter the CVM")
+		}
+		if cfg.ModelDigest == "" && cfg.ModelManifestFile == "" {
+			return Config{}, fmt.Errorf("MODEL_DIGEST or MODEL_MANIFEST_FILE is required when CONFIDENTIAL_MODE is enabled")
 		}
 		for _, required := range []struct{ name, value string }{
 			{"ENTITLEMENT_JWKS_JSON", cfg.EntitlementJWKS},
@@ -271,6 +281,44 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	return cfg, nil
+}
+
+// ResolveModelManifest validates the one-time artifact measurement produced by
+// the isolated model-measurer sidecar. The proxy never mounts model weights;
+// it consumes only this JSON manifest from a separate read-only volume.
+func ResolveModelManifest(cfg Config) (Config, error) {
+	if cfg.ModelManifestFile == "" {
+		return cfg, nil
+	}
+	raw, err := os.ReadFile(cfg.ModelManifestFile)
+	if err != nil {
+		return Config{}, fmt.Errorf("read MODEL_MANIFEST_FILE: %w", err)
+	}
+	var value struct {
+		Version    int    `json:"version"`
+		Algorithm  string `json:"algorithm"`
+		ModelID    string `json:"model_id"`
+		FileCount  int    `json:"file_count"`
+		TotalBytes int64  `json:"total_bytes"`
+		Digest     string `json:"digest"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return Config{}, fmt.Errorf("parse MODEL_MANIFEST_FILE: %w", err)
+	}
+	if value.Version != 1 || value.Algorithm != "sha256-tree-v1" || value.FileCount < 1 || value.TotalBytes < 1 {
+		return Config{}, fmt.Errorf("MODEL_MANIFEST_FILE has an unsupported or empty artifact measurement")
+	}
+	if value.ModelID != cfg.ModelID || !canonicalModelID.MatchString(value.ModelID) {
+		return Config{}, fmt.Errorf("MODEL_MANIFEST_FILE model ID does not match MODEL_ID")
+	}
+	if !sha256Digest.MatchString(value.Digest) {
+		return Config{}, fmt.Errorf("MODEL_MANIFEST_FILE contains an invalid digest")
+	}
+	if cfg.ModelDigest != "" && cfg.ModelDigest != value.Digest {
+		return Config{}, fmt.Errorf("MODEL_DIGEST does not match MODEL_MANIFEST_FILE")
+	}
+	cfg.ModelDigest = value.Digest
 	return cfg, nil
 }
 

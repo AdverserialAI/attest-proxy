@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1
+FROM golang:1.23-bookworm@sha256:167053a2bb901972bf2c1611f8f52c44d5fe7e762e5cab213708d82c421614db AS build
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/model-measurer/ cmd/model-measurer/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/model-measurer ./cmd/model-measurer
+RUN mkdir -p /out/model-evidence && chown 65532:65532 /out/model-evidence
+
+FROM gcr.io/distroless/static-debian12@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
+COPY --from=build /out/model-measurer /model-measurer
+COPY --from=build --chown=65532:65532 /out/model-evidence /model-evidence
+USER nonroot
+ENTRYPOINT ["/model-measurer"]

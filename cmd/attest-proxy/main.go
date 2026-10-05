@@ -40,6 +40,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	cfg, err = config.ResolveModelManifest(cfg)
+	if err != nil {
+		return err
+	}
 
 	// Confidential deployments use a stable key from sealed configuration. Its
 	// public JWK is pinned in the public policy, while every fresh TDX quote

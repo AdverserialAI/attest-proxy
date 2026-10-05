@@ -2,6 +2,9 @@ package config
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -289,6 +292,7 @@ func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
 		"METER_SERVER_CA_FILE":   "/state/meter-tls/ingress-ca.crt",
 		"UPSTREAM_BEARER_TOKEN":  "local-only-secret",
 		"RECEIPT_SIGNING_SEED":   seed,
+		"MODEL_DIGEST":           "sha256:" + strings.Repeat("a", 64),
 	}
 	if _, err := FromEnv(func(k string) string { return base[k] }); err != nil {
 		t.Fatalf("complete confidential config: %v", err)
@@ -310,5 +314,32 @@ func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
 	env["AUTH_REQUIRED"] = "1"
 	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
 		t.Error("legacy raw-key gate accepted in confidential mode")
+	}
+}
+
+func TestResolveModelManifest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.json")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	if err := os.WriteFile(path, []byte(`{"version":1,"algorithm":"sha256-tree-v1","model_id":"lordx64/cyberglm","file_count":2,"total_bytes":3,"digest":"`+digest+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveModelManifest(Config{ModelID: "lordx64/cyberglm", ModelManifestFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelDigest != digest {
+		t.Fatalf("ModelDigest = %q, want %q", cfg.ModelDigest, digest)
+	}
+}
+
+func TestResolveModelManifestRejectsMismatchedModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"algorithm":"sha256-tree-v1","model_id":"lordx64/cyberkimi","file_count":1,"total_bytes":1,"digest":"sha256:`+strings.Repeat("a", 64)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveModelManifest(Config{ModelID: "lordx64/cyberglm", ModelManifestFile: path}); err == nil {
+		t.Fatal("ResolveModelManifest accepted a mismatched model")
 	}
 }
