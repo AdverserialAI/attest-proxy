@@ -8,7 +8,9 @@ inference deployment. It runs **inside** a Phala dstack confidential VM
    LiveDNS (production) or an ECDSA P-256 self-signed key generated **in
    process** (dev default; never on disk),
 2. serves nonce-bound TDX attestation evidence plus a signed ES256
-   verification receipt (`GET /attestation`),
+   verification receipt (`GET /attestation`). In confidential mode the
+   receipt key comes from a sealed, stable seed and its public JWK is pinned
+   in the public runtime policy,
 3. reverse-proxies everything else to the loopback inference server, and
 4. never logs request or response content — method, path class, status,
    byte count, and duration only. There is no content-logging escape hatch.
@@ -51,6 +53,7 @@ docker run --rm -p 8443:8443 \
 | `ENDPOINT` | `https://api.adverserial.ai` | Public base URL (receipt claim `endpoint`) |
 | `RECEIPT_ISSUER` | `https://verify.adverserial.ai` | Receipt claim `iss` |
 | `RECEIPT_AUDIENCE` | `cc-chat.adverserial.ai` | Receipt claim `aud` |
+| `RECEIPT_SIGNING_SEED` | _(empty)_ | Sealed 32-byte base64url seed for the stable P-256 receipt signer. Required in `CONFIDENTIAL_MODE`; publish only the derived public JWK in the active policy. |
 | `COMPOSE_DIGEST` | _(empty)_ | `sha256:` digest of the dstack compose config |
 | `MODEL_DIGEST` | _(empty)_ | `sha256:` digest of the model artifact |
 | `RUNTIME_DIGEST` | _(empty)_ | Expected runtime measurement digest |

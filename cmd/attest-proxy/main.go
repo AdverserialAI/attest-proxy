@@ -40,10 +40,17 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// The receipt key is generated in process memory and never touches disk.
-	// TODO(v1): derive/seal it via the dstack KMS (/GetKey) bound to the
-	// measured workload, and publish rotation metadata (WP-4, WP-5).
-	signer, err := receipt.NewSigner()
+	// Confidential deployments use a stable key from sealed configuration. Its
+	// public JWK is pinned in the public policy, while every fresh TDX quote
+	// binds that key to the active TLS certificate and workload. Development
+	// keeps the short-lived in-memory key so it cannot be mistaken for a
+	// production trust root.
+	var signer *receipt.Signer
+	if cfg.ReceiptSigningSeed != "" {
+		signer, err = receipt.NewSignerFromSeed(cfg.ReceiptSigningSeed)
+	} else {
+		signer, err = receipt.NewSigner()
+	}
 	if err != nil {
 		return err
 	}

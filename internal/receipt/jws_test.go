@@ -93,6 +93,24 @@ func TestMintRoundTrip(t *testing.T) {
 
 // TestTamperedReceiptFails: flipping a payload byte must break verification,
 // as must signing with a different key.
+func TestSignerFromSeedIsStableAndValid(t *testing.T) {
+	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	first, err := NewSignerFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewSignerFromSeed("p256:" + seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.KeyID() != second.KeyID() {
+		t.Fatalf("stable seed yielded different key IDs: %q vs %q", first.KeyID(), second.KeyID())
+	}
+	if _, err := NewSignerFromSeed("not-a-seed"); err == nil {
+		t.Fatal("invalid receipt seed unexpectedly accepted")
+	}
+}
+
 func TestTamperedReceiptFails(t *testing.T) {
 	signer, _ := NewSigner()
 	other, _ := NewSigner()

@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/adverserial/attest-proxy/internal/canonjson"
 )
@@ -34,6 +35,26 @@ func NewSigner() (*Signer, error) {
 		return nil, fmt.Errorf("generate receipt key: %w", err)
 	}
 	return NewSignerFromKey(key)
+}
+
+// NewSignerFromSeed deterministically derives a P-256 signer from a sealed
+// 32-byte base64url seed. The seed must only be supplied through the CVM's
+// sealed environment. This makes the receipt public key stable across normal
+// restarts and lets the public policy pin it before inference is activated.
+func NewSignerFromSeed(encoded string) (*Signer, error) {
+	encoded = strings.TrimPrefix(strings.TrimSpace(encoded), "p256:")
+	seed, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(seed) != 32 {
+		return nil, fmt.Errorf("RECEIPT_SIGNING_SEED must be a 32-byte base64url seed")
+	}
+	curve := elliptic.P256()
+	// Map the 256-bit seed into [1, N-1] without ever accepting a zero scalar.
+	d := new(big.Int).SetBytes(seed)
+	nMinusOne := new(big.Int).Sub(curve.Params().N, big.NewInt(1))
+	d.Mod(d, nMinusOne)
+	d.Add(d, big.NewInt(1))
+	x, y := curve.ScalarBaseMult(d.Bytes())
+	return NewSignerFromKey(&ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y}, D: d})
 }
 
 // NewSignerFromKey wraps an existing key (used by tests and, later, KMS

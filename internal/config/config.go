@@ -28,6 +28,9 @@ type Config struct {
 
 	ReceiptIssuer   string // RECEIPT_ISSUER   → receipt claim iss
 	ReceiptAudience string // RECEIPT_AUDIENCE → receipt claim aud
+	// ReceiptSigningSeed is a sealed 32-byte base64url seed for the stable
+	// P-256 receipt key. Its public JWK is pinned in the public policy.
+	ReceiptSigningSeed string // RECEIPT_SIGNING_SEED
 
 	DstackSocket string // DSTACK_SOCKET, default /var/run/dstack.sock
 	DevMode      bool   // DEV_MODE — synthetic evidence, no dstack quote
@@ -112,24 +115,25 @@ type Config struct {
 // FromEnv reads configuration using getenv (pass os.Getenv in production).
 func FromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		ListenAddr:      orDefault(getenv("LISTEN_ADDR"), ":8443"),
-		Upstream:        orDefault(getenv("UPSTREAM"), "http://127.0.0.1:30000"),
-		UpstreamBearer:  getenv("UPSTREAM_BEARER_TOKEN"),
-		ModelID:         orDefault(getenv("MODEL_ID"), "lordx64/cyberglm"),
-		PolicyID:        orDefault(getenv("POLICY_ID"), "adverserial-policy/dev"),
-		Endpoint:        orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai"),
-		ComposeDigest:   getenv("COMPOSE_DIGEST"),
-		ModelDigest:     getenv("MODEL_DIGEST"),
-		RuntimeDigest:   getenv("RUNTIME_DIGEST"),
-		ReceiptIssuer:   orDefault(getenv("RECEIPT_ISSUER"), "https://verify.adverserial.ai"),
-		ReceiptAudience: orDefault(getenv("RECEIPT_AUDIENCE"), "cc-chat.adverserial.ai"),
-		DstackSocket:    orDefault(getenv("DSTACK_SOCKET"), "/var/run/dstack.sock"),
-		CORSAllowOrigin: getenv("CORS_ALLOW_ORIGIN"),
-		PublicBaseURL:   orDefault(getenv("PUBLIC_BASE_URL"), orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai")),
-		VerificationURL: orDefault(getenv("VERIFICATION_URL"), "https://verify.adverserial.ai"),
-		AttestedModels:  splitCSV(getenv("ATTESTED_MODELS")),
-		ACMEDomains:     splitCSV(getenv("ACME_DOMAINS")),
-		ACMEEmail:       getenv("ACME_EMAIL"),
+		ListenAddr:         orDefault(getenv("LISTEN_ADDR"), ":8443"),
+		Upstream:           orDefault(getenv("UPSTREAM"), "http://127.0.0.1:30000"),
+		UpstreamBearer:     getenv("UPSTREAM_BEARER_TOKEN"),
+		ModelID:            orDefault(getenv("MODEL_ID"), "lordx64/cyberglm"),
+		PolicyID:           orDefault(getenv("POLICY_ID"), "adverserial-policy/dev"),
+		Endpoint:           orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai"),
+		ComposeDigest:      getenv("COMPOSE_DIGEST"),
+		ModelDigest:        getenv("MODEL_DIGEST"),
+		RuntimeDigest:      getenv("RUNTIME_DIGEST"),
+		ReceiptIssuer:      orDefault(getenv("RECEIPT_ISSUER"), "https://verify.adverserial.ai"),
+		ReceiptAudience:    orDefault(getenv("RECEIPT_AUDIENCE"), "cc-chat.adverserial.ai"),
+		ReceiptSigningSeed: getenv("RECEIPT_SIGNING_SEED"),
+		DstackSocket:       orDefault(getenv("DSTACK_SOCKET"), "/var/run/dstack.sock"),
+		CORSAllowOrigin:    getenv("CORS_ALLOW_ORIGIN"),
+		PublicBaseURL:      orDefault(getenv("PUBLIC_BASE_URL"), orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai")),
+		VerificationURL:    orDefault(getenv("VERIFICATION_URL"), "https://verify.adverserial.ai"),
+		AttestedModels:     splitCSV(getenv("ATTESTED_MODELS")),
+		ACMEDomains:        splitCSV(getenv("ACME_DOMAINS")),
+		ACMEEmail:          getenv("ACME_EMAIL"),
 		ACMEDirectoryURL: orDefault(getenv("ACME_DIRECTORY_URL"),
 			"https://acme-v02.api.letsencrypt.org/directory"),
 		GandiPAT:  getenv("GANDI_PAT"),
@@ -183,6 +187,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			{"METER_CLIENT_KEY_FILE", cfg.MeterClientKeyFile},
 			{"METER_SERVER_CA_FILE", cfg.MeterServerCAFile},
 			{"UPSTREAM_BEARER_TOKEN", cfg.UpstreamBearer},
+			{"RECEIPT_SIGNING_SEED", cfg.ReceiptSigningSeed},
 		} {
 			if required.value == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)

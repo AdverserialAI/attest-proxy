@@ -288,11 +288,12 @@ func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
 		"METER_CLIENT_KEY_FILE":  "/state/meter-tls/client.key",
 		"METER_SERVER_CA_FILE":   "/state/meter-tls/ingress-ca.crt",
 		"UPSTREAM_BEARER_TOKEN":  "local-only-secret",
+		"RECEIPT_SIGNING_SEED":   seed,
 	}
 	if _, err := FromEnv(func(k string) string { return base[k] }); err != nil {
 		t.Fatalf("complete confidential config: %v", err)
 	}
-	for _, missing := range []string{"ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_SIGNING_SEED", "METER_OUTBOX_DIR", "METER_URL", "METER_CLIENT_CERT_FILE", "METER_CLIENT_KEY_FILE", "METER_SERVER_CA_FILE", "UPSTREAM_BEARER_TOKEN"} {
+	for _, missing := range []string{"ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_SIGNING_SEED", "METER_OUTBOX_DIR", "METER_URL", "METER_CLIENT_CERT_FILE", "METER_CLIENT_KEY_FILE", "METER_SERVER_CA_FILE", "UPSTREAM_BEARER_TOKEN", "RECEIPT_SIGNING_SEED"} {
 		env := make(map[string]string, len(base))
 		for k, v := range base {
 			env[k] = v
