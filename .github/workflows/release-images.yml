@@ -57,21 +57,3 @@ jobs:
           subject-name: ghcr.io/adverserialai/gpu-evidence-collector
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-
-  # The deployed CVM must pull release images without carrying a registry
-  # credential.  The source, build provenance and SBOM are public evidence,
-  # so published release packages are deliberately public too.
-  make-release-packages-public:
-    needs: [attest-proxy, gpu-evidence-collector]
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-    steps:
-      - name: Publish attest-proxy package visibility
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api --method PATCH "/orgs/${{ github.repository_owner }}/packages/container/attest-proxy" -f visibility=public
-      - name: Publish collector package visibility
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api --method PATCH "/orgs/${{ github.repository_owner }}/packages/container/gpu-evidence-collector" -f visibility=public
