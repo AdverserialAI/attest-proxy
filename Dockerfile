@@ -15,9 +15,11 @@ COPY internal/ internal/
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
       -o /out/attest-proxy ./cmd/attest-proxy
+RUN mkdir -p /out/state && chown 65532:65532 /out/state
 
 FROM gcr.io/distroless/static-debian12@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
 COPY --from=build /out/attest-proxy /attest-proxy
+COPY --from=build --chown=65532:65532 /out/state /state
 EXPOSE 8443
 USER nonroot
 ENTRYPOINT ["/attest-proxy"]

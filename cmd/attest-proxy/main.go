@@ -19,6 +19,7 @@ import (
 
 	"github.com/adverserial/attest-proxy/internal/acme"
 	"github.com/adverserial/attest-proxy/internal/attestation"
+	"github.com/adverserial/attest-proxy/internal/billing"
 	"github.com/adverserial/attest-proxy/internal/buildinfo"
 	"github.com/adverserial/attest-proxy/internal/config"
 	"github.com/adverserial/attest-proxy/internal/receipt"
@@ -53,6 +54,11 @@ func run(logger *slog.Logger) error {
 	}
 	if err != nil {
 		return err
+	}
+	if cfg.MeterTLSBundleB64 != "" {
+		if err := billing.MaterializeMeterTLSBundle(cfg.MeterTLSBundleB64, "/state/meter-tls"); err != nil {
+			return fmt.Errorf("materialize confidential meter TLS bundle: %w", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

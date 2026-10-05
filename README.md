@@ -83,9 +83,10 @@ docker run --rm -p 8443:8443 \
 | `METER_AUDIENCE` | `https://billing.adverserial.ai` | Meter-event audience. |
 | `METER_OUTBOX_DIR` | — | Persistent, private directory for signed meter retry records. |
 | `METER_URL` | — | Fixed `https://meter-ingress…` origin. Required in confidential mode; it must not point to Heroku billing. |
-| `METER_CLIENT_CERT_FILE` | — | Sealed CVM client certificate PEM for the meter-ingress mTLS link. |
-| `METER_CLIENT_KEY_FILE` | — | Sealed CVM client private-key PEM for the meter-ingress mTLS link. |
-| `METER_SERVER_CA_FILE` | — | CA PEM used to authenticate the dedicated meter-ingress TLS server. |
+| `METER_TLS_BUNDLE_B64` | — | Preferred production input: sealed base64url JSON containing `client_cert_pem`, `client_key_pem`, and `ingress_ca_pem`. The proxy validates and atomically materializes it into its private state volume before opening the mTLS client. |
+| `METER_CLIENT_CERT_FILE` | — | File-mode alternative for a CVM-managed secret store; cannot be combined with `METER_TLS_BUNDLE_B64`. |
+| `METER_CLIENT_KEY_FILE` | — | File-mode alternative for a CVM-managed secret store; cannot be combined with `METER_TLS_BUNDLE_B64`. |
+| `METER_SERVER_CA_FILE` | — | File-mode alternative for a CVM-managed secret store; cannot be combined with `METER_TLS_BUNDLE_B64`. |
 | `CHAT_HOST` | _(empty = disabled)_ | Static-chat virtual host, e.g. `cc-chat.adverserial.ai` |
 | `CHAT_DOCROOT` | _(empty = disabled)_ | SPA docroot for `CHAT_HOST` (set both or neither) |
 | `GPU_EVIDENCE_FILE` | `/data/gpu-evidence.json` | Cached NRAS EAT bundle from the collector sidecar (embedded as `gpu_evidence`) |

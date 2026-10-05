@@ -5,6 +5,8 @@ WORKDIR /app
 COPY collector/gpu_evidence_collector.py /app/gpu_evidence_collector.py
 # The collector API is pinned; release provenance records the resolved image
 # digest. Never install packages at CVM startup.
-RUN pip install --no-cache-dir --disable-pip-version-check nv-attestation-sdk==2.7.3
+RUN pip install --no-cache-dir --disable-pip-version-check nv-attestation-sdk==2.7.3 \
+    && mkdir -p /evidence \
+    && chown 65532:65532 /evidence
 USER 65532:65532
 ENTRYPOINT ["python", "/app/gpu_evidence_collector.py"]

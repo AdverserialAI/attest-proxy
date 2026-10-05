@@ -98,9 +98,13 @@ type Config struct {
 	// MeterURL is the externally deployed TLS-terminating meter ingress. In
 	// confidential mode it is mandatory and must not be the Heroku billing app.
 	MeterURL            string // METER_URL — e.g. https://meter-ingress.adverserial.ai
-	MeterClientCertFile string // METER_CLIENT_CERT_FILE — sealed CVM client certificate PEM
-	MeterClientKeyFile  string // METER_CLIENT_KEY_FILE — sealed CVM client private key PEM
-	MeterServerCAFile   string // METER_SERVER_CA_FILE — meter ingress CA PEM
+	MeterClientCertFile string // METER_CLIENT_CERT_FILE — materialized CVM client certificate PEM
+	MeterClientKeyFile  string // METER_CLIENT_KEY_FILE — materialized CVM client private key PEM
+	MeterServerCAFile   string // METER_SERVER_CA_FILE — materialized meter ingress CA PEM
+	// MeterTLSBundleB64 is a sealed base64url JSON bundle. When supplied, the
+	// proxy validates and materializes it under its private state volume before
+	// creating the mTLS client. No shared Docker secret volume is required.
+	MeterTLSBundleB64 string // METER_TLS_BUNDLE_B64
 
 	// Chat vhost: when both are set, requests with Host == ChatHost get the
 	// static SPA from ChatDocroot (API routes still reach the API handlers).
@@ -183,14 +187,32 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			{"METER_SIGNING_SEED", cfg.MeterSigningSeed},
 			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
 			{"METER_URL", cfg.MeterURL},
-			{"METER_CLIENT_CERT_FILE", cfg.MeterClientCertFile},
-			{"METER_CLIENT_KEY_FILE", cfg.MeterClientKeyFile},
-			{"METER_SERVER_CA_FILE", cfg.MeterServerCAFile},
 			{"UPSTREAM_BEARER_TOKEN", cfg.UpstreamBearer},
 			{"RECEIPT_SIGNING_SEED", cfg.ReceiptSigningSeed},
 		} {
 			if required.value == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
+			}
+		}
+		paths := []struct{ name, value string }{
+			{"METER_CLIENT_CERT_FILE", cfg.MeterClientCertFile},
+			{"METER_CLIENT_KEY_FILE", cfg.MeterClientKeyFile},
+			{"METER_SERVER_CA_FILE", cfg.MeterServerCAFile},
+		}
+		if cfg.MeterTLSBundleB64 != "" {
+			for _, path := range paths {
+				if path.value != "" {
+					return Config{}, fmt.Errorf("%s cannot be combined with METER_TLS_BUNDLE_B64", path.name)
+				}
+			}
+			cfg.MeterClientCertFile = "/state/meter-tls/client.crt"
+			cfg.MeterClientKeyFile = "/state/meter-tls/client.key"
+			cfg.MeterServerCAFile = "/state/meter-tls/ingress-ca.crt"
+		} else {
+			for _, path := range paths {
+				if path.value == "" {
+					return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", path.name)
+				}
 			}
 		}
 		meterURL, err := url.Parse(cfg.MeterURL)
