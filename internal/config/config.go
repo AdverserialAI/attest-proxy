@@ -24,7 +24,7 @@ type Config struct {
 	Endpoint       string // ENDPOINT — public base URL, echoed into receipt claims
 	ComposeDigest  string // COMPOSE_DIGEST — sha256 of the dstack compose file
 	ModelDigest    string // MODEL_DIGEST — sha256 of the model artifact
-	RuntimeDigest  string // RUNTIME_DIGEST — expected runtime measurement digest
+	RuntimeDigest  string // RUNTIME_DIGEST — immutable runtime image digest; TDX event log binds the complete compose
 
 	ReceiptIssuer   string // RECEIPT_ISSUER   → receipt claim iss
 	ReceiptAudience string // RECEIPT_AUDIENCE → receipt claim aud
