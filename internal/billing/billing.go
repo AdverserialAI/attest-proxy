@@ -28,9 +28,10 @@ type Client struct {
 	BaseURL string // legacy billing URL, e.g. https://billing.adverserial.ai
 	// MeterURL is the distinct mTLS meter-ingress URL in confidential mode.
 	// It must terminate TLS at an ingress that verifies the CVM client cert.
-	MeterURL     string
-	WriterSecret string
-	HTTP         *http.Client // optional; default 15s timeout
+	MeterURL           string
+	MeterIngressSecret string // direct-signed meter capability, never used for prompt traffic
+	WriterSecret       string
+	HTTP               *http.Client // optional; default 15s timeout
 }
 
 func (c *Client) httpClient() *http.Client {
@@ -108,8 +109,8 @@ func (c *Client) PostUsage(ctx context.Context, ev UsageEvent) error {
 }
 
 // PostMeter sends a proxy-signed, count-only confidential meter JWS through
-// the separately deployed mTLS meter ingress. The ingress authenticates the
-// CVM client certificate; billing independently verifies the Ed25519 JWS.
+// either the separately deployed mTLS meter ingress or the explicitly selected
+// direct-signed billing route. Billing independently verifies the Ed25519 JWS.
 func (c *Client) PostMeter(ctx context.Context, token string) error {
 	body, err := json.Marshal(map[string]string{"meter": token})
 	if err != nil {
@@ -125,6 +126,9 @@ func (c *Client) PostMeter(ctx context.Context, token string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.MeterIngressSecret != "" {
+		req.Header.Set("X-Adverserial-Meter-Ingress", c.MeterIngressSecret)
+	}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("billing confidential meter write: %w", err)
@@ -171,4 +175,14 @@ func NewMutualTLSHTTPClient(certFile, keyFile, serverCAFile string) (*http.Clien
 		MinVersion:   tls.VersionTLS13,
 	}
 	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
+}
+
+// NewTLS13HTTPClient is used for direct signed count-only meter delivery.
+// It relies on the platform trust store for billing's public certificate and
+// deliberately has no client credential; the meter JWS plus dedicated
+// capability authenticate the event at the application boundary.
+func NewTLS13HTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+	return &http.Client{Transport: transport, Timeout: 15 * time.Second}
 }

@@ -135,6 +135,21 @@ func TestConfidentialMeterContract(t *testing.T) {
 	}
 }
 
+func TestDirectSignedMeterAddsDedicatedCapability(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Adverserial-Meter-Ingress")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	if err := (&Client{MeterURL: server.URL, MeterIngressSecret: "direct-only-capability"}).PostMeter(context.Background(), "header.payload.signature"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "direct-only-capability" {
+		t.Fatalf("direct signed capability = %q", got)
+	}
+}
+
 func TestConfidentialMeterUsesDedicatedIngressURL(t *testing.T) {
 	var gotPath string
 	ingress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

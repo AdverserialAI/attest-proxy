@@ -111,6 +111,13 @@ type Config struct {
 	// proxy validates and materializes it under its private state volume before
 	// creating the mTLS client. No shared Docker secret volume is required.
 	MeterTLSBundleB64 string // METER_TLS_BUNDLE_B64
+	// MeterDeliveryMode is either "mtls-ingress" (default) or "direct-signed".
+	// direct-signed sends a count-only Ed25519 JWS directly to the fixed billing
+	// endpoint over TLS 1.3. It intentionally does not claim mTLS isolation.
+	MeterDeliveryMode string // METER_DELIVERY_MODE
+	// MeterIngressSecret is the capability billing requires in addition to the
+	// signed meter JWS for direct-signed delivery.
+	MeterIngressSecret string // METER_INGRESS_SHARED_SECRET
 
 	// Chat vhost: when both are set, requests with Host == ChatHost get the
 	// static SPA from ChatDocroot (API routes still reach the API handlers).
@@ -165,6 +172,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		MeterClientCertFile:    getenv("METER_CLIENT_CERT_FILE"),
 		MeterClientKeyFile:     getenv("METER_CLIENT_KEY_FILE"),
 		MeterServerCAFile:      getenv("METER_SERVER_CA_FILE"),
+		MeterDeliveryMode:      orDefault(getenv("METER_DELIVERY_MODE"), "mtls-ingress"),
+		MeterIngressSecret:     getenv("METER_INGRESS_SHARED_SECRET"),
 		ConfidentialActivation: orDefault(getenv("CONFIDENTIAL_ACTIVATION"), "pre-activation"),
 		ChatHost:               strings.ToLower(getenv("CHAT_HOST")),
 		ChatDocroot:            getenv("CHAT_DOCROOT"),
@@ -204,30 +213,45 @@ func FromEnv(getenv func(string) string) (Config, error) {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
 			}
 		}
+		meterURL, err := url.Parse(cfg.MeterURL)
+		if err != nil || meterURL.Scheme != "https" || meterURL.Host == "" || meterURL.User != nil || meterURL.RawQuery != "" || meterURL.Fragment != "" || (meterURL.Path != "" && meterURL.Path != "/") {
+			return Config{}, fmt.Errorf("METER_URL must be an exact https://host URL")
+		}
 		paths := []struct{ name, value string }{
 			{"METER_CLIENT_CERT_FILE", cfg.MeterClientCertFile},
 			{"METER_CLIENT_KEY_FILE", cfg.MeterClientKeyFile},
 			{"METER_SERVER_CA_FILE", cfg.MeterServerCAFile},
 		}
-		if cfg.MeterTLSBundleB64 != "" {
-			for _, path := range paths {
-				if path.value != "" {
-					return Config{}, fmt.Errorf("%s cannot be combined with METER_TLS_BUNDLE_B64", path.name)
+		switch cfg.MeterDeliveryMode {
+		case "mtls-ingress":
+			if cfg.MeterTLSBundleB64 != "" {
+				for _, path := range paths {
+					if path.value != "" {
+						return Config{}, fmt.Errorf("%s cannot be combined with METER_TLS_BUNDLE_B64", path.name)
+					}
+				}
+				cfg.MeterClientCertFile = "/state/meter-tls/client.crt"
+				cfg.MeterClientKeyFile = "/state/meter-tls/client.key"
+				cfg.MeterServerCAFile = "/state/meter-tls/ingress-ca.crt"
+			} else {
+				for _, path := range paths {
+					if path.value == "" {
+						return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", path.name)
+					}
 				}
 			}
-			cfg.MeterClientCertFile = "/state/meter-tls/client.crt"
-			cfg.MeterClientKeyFile = "/state/meter-tls/client.key"
-			cfg.MeterServerCAFile = "/state/meter-tls/ingress-ca.crt"
-		} else {
-			for _, path := range paths {
-				if path.value == "" {
-					return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", path.name)
-				}
+		case "direct-signed":
+			if cfg.MeterTLSBundleB64 != "" || cfg.MeterClientCertFile != "" || cfg.MeterClientKeyFile != "" || cfg.MeterServerCAFile != "" {
+				return Config{}, fmt.Errorf("direct-signed meter delivery cannot use mTLS material")
 			}
-		}
-		meterURL, err := url.Parse(cfg.MeterURL)
-		if err != nil || meterURL.Scheme != "https" || meterURL.Host == "" || meterURL.User != nil || meterURL.RawQuery != "" || meterURL.Fragment != "" || (meterURL.Path != "" && meterURL.Path != "/") {
-			return Config{}, fmt.Errorf("METER_URL must be an exact https://host URL")
+			if cfg.MeterIngressSecret == "" {
+				return Config{}, fmt.Errorf("METER_INGRESS_SHARED_SECRET is required for direct-signed meter delivery")
+			}
+			if meterURL.Host != "billing.adverserial.ai" {
+				return Config{}, fmt.Errorf("direct-signed METER_URL must target billing.adverserial.ai")
+			}
+		default:
+			return Config{}, fmt.Errorf("METER_DELIVERY_MODE must be mtls-ingress or direct-signed")
 		}
 		if cfg.ConfidentialActivation != "pre-activation" && cfg.ConfidentialActivation != "active" {
 			return Config{}, fmt.Errorf("CONFIDENTIAL_ACTIVATION must be pre-activation or active")

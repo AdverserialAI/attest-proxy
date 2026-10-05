@@ -343,3 +343,37 @@ func TestResolveModelManifestRejectsMismatchedModel(t *testing.T) {
 		t.Fatal("ResolveModelManifest accepted a mismatched model")
 	}
 }
+
+func TestConfidentialModeDirectSignedMetering(t *testing.T) {
+	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	env := map[string]string{
+		"CONFIDENTIAL_MODE":           "1",
+		"AUTH_REQUIRED":               "0",
+		"ENTITLEMENT_JWKS_JSON":       `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
+		"ENTITLEMENT_REPLAY_DIR":      "/data/used-entitlements",
+		"METER_SIGNING_SEED":          seed,
+		"METER_OUTBOX_DIR":            "/data/meter-outbox",
+		"METER_URL":                   "https://billing.adverserial.ai",
+		"METER_DELIVERY_MODE":         "direct-signed",
+		"METER_INGRESS_SHARED_SECRET": "dedicated-meter-capability",
+		"UPSTREAM_BEARER_TOKEN":       "local-only-secret",
+		"RECEIPT_SIGNING_SEED":        seed,
+		"MODEL_DIGEST":                "sha256:" + strings.Repeat("a", 64),
+	}
+	cfg, err := FromEnv(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("direct-signed config: %v", err)
+	}
+	if cfg.MeterDeliveryMode != "direct-signed" || cfg.MeterIngressSecret == "" {
+		t.Fatalf("direct-signed settings were not retained: %+v", cfg)
+	}
+	delete(env, "METER_INGRESS_SHARED_SECRET")
+	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("direct-signed config accepted without meter capability")
+	}
+	env["METER_INGRESS_SHARED_SECRET"] = "dedicated-meter-capability"
+	env["METER_URL"] = "https://other.example"
+	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("direct-signed config accepted a non-billing destination")
+	}
+}
