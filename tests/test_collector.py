@@ -171,6 +171,18 @@ def test_extract_jwts_tolerates_invalid_json_string(collector):
     assert collector.extract_jwts("plain text") == []
 
 
+def test_is_nvidia_eat_filters_session_tokens(collector):
+    def jwt(alg, kid=None):
+        import base64 as b
+        import json as j
+        header = b.urlsafe_b64encode(j.dumps({"alg": alg, **({"kid": kid} if kid else {})}).encode()).rstrip(b"=").decode()
+        return f"{header}.x.y"
+    assert collector._is_nvidia_eat(jwt("ES384", "nv-eat-kid-prod-x")) is True
+    assert collector._is_nvidia_eat(jwt("HS256")) is False
+    assert collector._is_nvidia_eat(jwt("ES384")) is False
+    assert collector._is_nvidia_eat("not-a-jwt") is False
+
+
 def test_missing_service_key_fails_closed(monkeypatch):
     pkg, sub = make_fake_sdk()
     monkeypatch.setitem(sys.modules, "nv_attestation_sdk", pkg)

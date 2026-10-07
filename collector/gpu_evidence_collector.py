@@ -20,6 +20,7 @@ Modes:
 """
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -39,6 +40,17 @@ log = logging.getLogger("gpu-evidence-collector")
 NRAS_URL = os.environ.get("NRAS_URL", "https://nras.attestation.nvidia.com/v4/attest/gpu")
 DEFAULT_OUT = "/data/gpu-evidence.json"
 DEFAULT_INTERVAL = 300  # seconds; NRAS round-trips take seconds, so 5 min is the freshness/cost tradeoff
+
+
+def _is_nvidia_eat(token):
+    """Keep only NVIDIA-signed detached/overall EATs: ES384 header with a kid.
+    The SDK token structure also carries an HS256 session JWT that is not an
+    EAT and must not enter the bundle."""
+    try:
+        header = json.loads(base64.urlsafe_b64decode(token.split(".", 1)[0] + "=="))
+    except (ValueError, IndexError, UnicodeDecodeError):
+        return False
+    return header.get("alg") == "ES384" and bool(header.get("kid"))
 
 
 def extract_jwts(node, _depth=0):
@@ -99,7 +111,7 @@ def collect_bundle():
     if not ok:
         raise RuntimeError("NRAS attestation returned a negative verdict")
     token = client.get_token()
-    eat_jwts = extract_jwts(token)
+    eat_jwts = [jwt for jwt in extract_jwts(token) if _is_nvidia_eat(jwt)]
     if not eat_jwts:
         raise RuntimeError("NRAS attestation succeeded but yielded no EAT JWTs")
     if len(eat_jwts) < minimum_gpus:
