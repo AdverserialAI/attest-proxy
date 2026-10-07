@@ -5,8 +5,8 @@ inference deployment. It runs **inside** a Phala dstack confidential VM
 (Intel TDX) in front of the SGLang inference server and:
 
 1. terminates TLS in-enclave — either an ACME DNS-01 certificate via Gandi
-   LiveDNS (production) or an ECDSA P-256 self-signed key generated **in
-   process** (dev default; never on disk),
+   LiveDNS or Cloudflare (production) or an ECDSA P-256 self-signed key
+   generated **in process** (dev default; never on disk),
 2. serves nonce-bound TDX attestation evidence plus a signed ES256
    verification receipt (`GET /attestation`). In confidential mode the
    receipt key comes from a sealed, stable seed and its public JWK is pinned
@@ -15,8 +15,9 @@ inference deployment. It runs **inside** a Phala dstack confidential VM
 4. never logs request or response content — method, path class, status,
    byte count, and duration only. There is no content-logging escape hatch.
 
-Zero external dependencies: the Go standard library only (`go.mod` has no
-`require` block). Requires Go 1.23+.
+Stdlib-first: the only third-party dependency is the MIT-licensed Tinfoil
+EHBP reference implementation (see *Third-party protocol implementation*
+below). Requires Go 1.26+.
 
 ## Build, test, run
 
@@ -67,8 +68,11 @@ docker run --rm -p 8443:8443 \
 | `ACME_DOMAINS` | _(empty = self-signed)_ | Comma-separated domains to certify via ACME DNS-01 |
 | `ACME_EMAIL` | — | ACME account contact (required when `ACME_DOMAINS` set) |
 | `ACME_DIRECTORY_URL` | Let's Encrypt production | Use the LE **staging** directory while testing issuance |
-| `GANDI_PAT` | — | Gandi LiveDNS personal access token (required for ACME) |
-| `GANDI_ZONE` | — | DNS zone owning the domains, e.g. `adverserial.ai` |
+| `DNS_PROVIDER` | `gandi` | ACME DNS-01 provider: `gandi` or `cloudflare` |
+| `GANDI_PAT` | — | Gandi LiveDNS personal access token (required for ACME with `DNS_PROVIDER=gandi`) |
+| `GANDI_ZONE` | — | Gandi DNS zone owning the domains, e.g. `adverserial.ai` |
+| `CLOUDFLARE_API_TOKEN` | — | Cloudflare API token with Edit-zone-DNS on the zone (required for ACME with `DNS_PROVIDER=cloudflare`) |
+| `CLOUDFLARE_ZONE` | — | Cloudflare DNS zone owning the domains, e.g. `adverserial.ai` |
 | `CERT_DIR` | — | dstack-volume path persisting the ACME account key + certs |
 | `AUTH_REQUIRED` | `1` (on) | Gate `POST /v1/*` behind billing `/auth/check` |
 | `BILLING_URL` | — | Billing service base URL (required when `AUTH_REQUIRED` on) |
@@ -250,20 +254,23 @@ it always sees identity JSON; gzip for all other routes passes through
 end-to-end untouched. Body content is never logged during augmentation (the
 no-content-logging test covers this path too).
 
-### TLS certificates: self-signed (default) or ACME DNS-01 via Gandi
+### TLS certificates: self-signed (default) or ACME DNS-01
 
 When `ACME_DOMAINS` is empty, the proxy keeps generating a self-signed P-256
 certificate in process at boot — trust comes from the quote-bound SPKI, not a
-CA. When `ACME_DOMAINS` is set (with `ACME_EMAIL`, `GANDI_PAT`, `GANDI_ZONE`,
-`CERT_DIR`), the proxy runs a minimal stdlib-only RFC 8555 client:
+CA. When `ACME_DOMAINS` is set (with `ACME_EMAIL`, `CERT_DIR`, and the
+`DNS_PROVIDER` credentials — `GANDI_PAT`/`GANDI_ZONE` for Gandi LiveDNS, the
+default, or `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ZONE` for Cloudflare), the
+proxy runs a minimal stdlib-only RFC 8555 client:
 
 1. Loads (or creates and persists) the P-256 ACME account key at
    `CERT_DIR/account.key`.
 2. If `CERT_DIR/certificate.crt` exists, covers all configured domains, and
    has ≥30 days left, it is used as-is (no re-issuance on restart).
 3. Otherwise: new order → for each domain, `_acme-challenge.<sub>` TXT record
-   set via Gandi LiveDNS (`PUT/DELETE
-   /v5/livedns/domains/{zone}/records/{name}/TXT`) → challenge notify →
+   set via the selected provider (Gandi LiveDNS `PUT/DELETE
+   /v5/livedns/domains/{zone}/records/{name}/TXT`, or Cloudflare
+   `POST/PUT/DELETE /zones/{zoneID}/dns_records`) → challenge notify →
    authorization poll → finalize with a fresh CSR → chain download → persist
    to `CERT_DIR`. Challenge records are always deleted afterwards.
 4. A background ticker checks every 12 h and renews (hot-swapping the serving
@@ -483,7 +490,7 @@ exists for client-integration development and is always marked `"dev": true`.
 cmd/attest-proxy/        main: config, keygen, ACME wiring, graceful shutdown
 collector/               GPU evidence collector (nv_attestation_sdk → NRAS, atomic bundle)
 tests/                   collector tests (mocked SDK, offline)
-internal/acme/           RFC 8555 dns-01 client, Gandi LiveDNS, cert store
+internal/acme/           RFC 8555 dns-01 client, Gandi LiveDNS + Cloudflare providers, cert store
 internal/attestation/    evidence building, report_data, GPU bundle cache, dstack QuoteSource
 internal/billing/        billing service client (auth check + usage write)
 internal/canonjson/      TS-identical canonical JSON + digest

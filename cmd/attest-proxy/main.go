@@ -141,8 +141,8 @@ func run(logger *slog.Logger) error {
 	return err
 }
 
-// setupTLS returns the certificate holder: an ACME DNS-01 certificate via
-// Gandi LiveDNS when ACME_DOMAINS is configured (with a background renewal
+// setupTLS returns the certificate holder: an ACME DNS-01 certificate via the
+// configured DNS provider when ACME_DOMAINS is set (with a background renewal
 // loop), otherwise the in-process self-signed certificate.
 func setupTLS(ctx context.Context, cfg config.Config, logger *slog.Logger) (*server.CertHolder, error) {
 	if len(cfg.ACMEDomains) == 0 {
@@ -158,12 +158,13 @@ func setupTLS(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ser
 	if err != nil {
 		return nil, err
 	}
+	dns, zone := dnsProvider(cfg)
 	client := acme.NewClient(acme.Config{
 		DirectoryURL:     cfg.ACMEDirectoryURL,
 		Email:            cfg.ACMEEmail,
-		Zone:             cfg.GandiZone,
-		DNS:              &acme.GandiProvider{PAT: cfg.GandiPAT, Zone: cfg.GandiZone},
-		PropagationDelay: 10 * time.Second, // let LiveDNS converge before CA validation
+		Zone:             zone,
+		DNS:              dns,
+		PropagationDelay: 10 * time.Second, // let DNS converge before CA validation
 	}, accountKey)
 
 	cert, err := acme.LoadOrIssue(ctx, store, client, cfg.ACMEDomains, acme.DefaultRenewBefore, logger)
@@ -181,6 +182,18 @@ func setupTLS(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ser
 
 	go renewLoop(ctx, store, client, holder, cfg.ACMEDomains, logger)
 	return holder, nil
+}
+
+// dnsProvider constructs the ACME DNS-01 provider selected by DNS_PROVIDER
+// and returns it with the DNS zone it manages. Config validation has already
+// rejected unsupported providers and missing credentials.
+func dnsProvider(cfg config.Config) (acme.DNSProvider, string) {
+	switch cfg.DNSProvider {
+	case "cloudflare":
+		return &acme.CloudflareProvider{Token: cfg.CloudflareAPIToken, Zone: cfg.CloudflareZone}, cfg.CloudflareZone
+	default: // "gandi"
+		return &acme.GandiProvider{PAT: cfg.GandiPAT, Zone: cfg.GandiZone}, cfg.GandiZone
+	}
 }
 
 // renewLoop re-issues and hot-swaps the certificate when fewer than

@@ -216,6 +216,65 @@ func TestACMEValidation(t *testing.T) {
 	}
 }
 
+func TestACMEDNSProviderSelection(t *testing.T) {
+	withDomains := func(env map[string]string) func(string) string {
+		base := map[string]string{
+			"ACME_DOMAINS": "cc-api.adverserial.ai",
+			"ACME_EMAIL":   "ops@adverserial.ai",
+			"CERT_DIR":     "/data/certs",
+		}
+		for k, v := range env {
+			base[k] = v
+		}
+		return noAuth(func(k string) string { return base[k] })
+	}
+
+	// Default provider is gandi and keeps requiring GANDI_*.
+	cfg, err := FromEnv(withDomains(map[string]string{
+		"GANDI_PAT":  "pat",
+		"GANDI_ZONE": "adverserial.ai",
+	}))
+	if err != nil {
+		t.Fatalf("gandi default: %v", err)
+	}
+	if cfg.DNSProvider != "gandi" {
+		t.Errorf("DNSProvider = %q, want gandi", cfg.DNSProvider)
+	}
+
+	// Cloudflare requires its own credentials, not GANDI_*.
+	for _, missing := range []string{"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ZONE"} {
+		env := map[string]string{
+			"DNS_PROVIDER":         "cloudflare",
+			"CLOUDFLARE_API_TOKEN": "token",
+			"CLOUDFLARE_ZONE":      "adverserial.ai",
+		}
+		delete(env, missing)
+		if _, err := FromEnv(withDomains(env)); err == nil {
+			t.Errorf("missing %s should fail", missing)
+		}
+	}
+	cfg, err = FromEnv(withDomains(map[string]string{
+		"DNS_PROVIDER":         "cloudflare",
+		"CLOUDFLARE_API_TOKEN": "token",
+		"CLOUDFLARE_ZONE":      "adverserial.ai",
+	}))
+	if err != nil {
+		t.Fatalf("cloudflare: %v", err)
+	}
+	if cfg.DNSProvider != "cloudflare" || cfg.CloudflareZone != "adverserial.ai" {
+		t.Errorf("cloudflare config not retained: %+v", cfg)
+	}
+
+	// Unknown providers fail with a clear error.
+	if _, err := FromEnv(withDomains(map[string]string{
+		"DNS_PROVIDER": "route53",
+		"GANDI_PAT":    "pat",
+		"GANDI_ZONE":   "adverserial.ai",
+	})); err == nil {
+		t.Error("unsupported DNS_PROVIDER should fail")
+	}
+}
+
 // TestAuthRequiredDefaultOn: auth is on by default and demands billing config.
 func TestAuthRequiredDefaultOn(t *testing.T) {
 	// Default on, billing missing → error.

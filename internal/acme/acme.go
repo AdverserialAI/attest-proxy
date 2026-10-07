@@ -1,6 +1,6 @@
 // Package acme implements a minimal RFC 8555 (ACME v2) client supporting
-// dns-01 challenges only, plus the Gandi LiveDNS provider and certificate
-// persistence used by attest-proxy.
+// dns-01 challenges only, plus the Gandi LiveDNS and Cloudflare DNS providers
+// and certificate persistence used by attest-proxy.
 //
 // Stdlib-only by invariant: JWS (ES256), CSR creation, and chain handling are
 // built directly on crypto/x509 and encoding/json.

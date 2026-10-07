@@ -70,8 +70,14 @@ type Config struct {
 	// point it at https://acme-staging-v02.api.letsencrypt.org/directory while
 	// testing issuance to avoid rate limits.
 	ACMEDirectoryURL string // ACME_DIRECTORY_URL
-	GandiPAT         string // GANDI_PAT — Gandi LiveDNS personal access token
-	GandiZone        string // GANDI_ZONE — e.g. adverserial.ai
+	// DNSProvider selects the ACME DNS-01 provider: "gandi" (default) or
+	// "cloudflare".
+	DNSProvider string // DNS_PROVIDER
+	GandiPAT    string // GANDI_PAT — Gandi LiveDNS personal access token
+	GandiZone   string // GANDI_ZONE — e.g. adverserial.ai
+	// CloudflareAPIToken needs Edit-zone-DNS permission on CloudflareZone.
+	CloudflareAPIToken string // CLOUDFLARE_API_TOKEN
+	CloudflareZone     string // CLOUDFLARE_ZONE — e.g. adverserial.ai
 	// CertDir persists the ACME account key and issued certificates (mount the
 	// dstack volume here). Required when ACME_DOMAINS is set.
 	CertDir string // CERT_DIR
@@ -161,9 +167,12 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ACMEEmail:          getenv("ACME_EMAIL"),
 		ACMEDirectoryURL: orDefault(getenv("ACME_DIRECTORY_URL"),
 			"https://acme-v02.api.letsencrypt.org/directory"),
-		GandiPAT:  getenv("GANDI_PAT"),
-		GandiZone: getenv("GANDI_ZONE"),
-		CertDir:   getenv("CERT_DIR"),
+		GandiPAT:           getenv("GANDI_PAT"),
+		GandiZone:          getenv("GANDI_ZONE"),
+		DNSProvider:        orDefault(getenv("DNS_PROVIDER"), "gandi"),
+		CloudflareAPIToken: getenv("CLOUDFLARE_API_TOKEN"),
+		CloudflareZone:     getenv("CLOUDFLARE_ZONE"),
+		CertDir:            getenv("CERT_DIR"),
 
 		BillingURL:             getenv("BILLING_URL"),
 		BillingWriterSecret:    getenv("BILLING_WRITER_SECRET"),
@@ -312,14 +321,27 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	}
 
 	if len(cfg.ACMEDomains) > 0 {
-		for _, required := range []struct{ name, value string }{
+		required := []struct{ name, value string }{
 			{"ACME_EMAIL", cfg.ACMEEmail},
-			{"GANDI_PAT", cfg.GandiPAT},
-			{"GANDI_ZONE", cfg.GandiZone},
 			{"CERT_DIR", cfg.CertDir},
-		} {
-			if required.value == "" {
-				return Config{}, fmt.Errorf("%s is required when ACME_DOMAINS is set", required.name)
+		}
+		switch cfg.DNSProvider {
+		case "gandi":
+			required = append(required,
+				struct{ name, value string }{"GANDI_PAT", cfg.GandiPAT},
+				struct{ name, value string }{"GANDI_ZONE", cfg.GandiZone},
+			)
+		case "cloudflare":
+			required = append(required,
+				struct{ name, value string }{"CLOUDFLARE_API_TOKEN", cfg.CloudflareAPIToken},
+				struct{ name, value string }{"CLOUDFLARE_ZONE", cfg.CloudflareZone},
+			)
+		default:
+			return Config{}, fmt.Errorf("DNS_PROVIDER %q is not supported (want gandi or cloudflare)", cfg.DNSProvider)
+		}
+		for _, r := range required {
+			if r.value == "" {
+				return Config{}, fmt.Errorf("%s is required when ACME_DOMAINS is set", r.name)
 			}
 		}
 	}
