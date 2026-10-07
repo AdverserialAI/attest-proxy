@@ -36,7 +36,7 @@ func TestDefaults(t *testing.T) {
 		"Upstream":        "http://127.0.0.1:30000",
 		"ModelID":         "lordx64/cyberglm",
 		"ReceiptIssuer":   "https://verify.adverserial.ai",
-		"ReceiptAudience": "cc-chat.adverserial.ai",
+		"ReceiptAudience": "https://cc-chat.adverserial.ai",
 		"DstackSocket":    "/var/run/dstack.sock",
 	}
 	for k, got := range checks {
