@@ -145,6 +145,11 @@ func BuildEvidence(in EvidenceInput) map[string]any {
 // evidence freshness flips. It is deliberately NOT a per-request evidence
 // digest (no nonce, no quote): per-request freshness comes from the TDX
 // quote at /attestation, per-request binding from the receipt hashes.
+//
+// The routine GPU evidence refresh timestamp (fresh_at) is deliberately
+// excluded: it rotates on every collector round (default 300s) and would roll
+// the attestation epoch under clients holding cached proofs. Epoch changes
+// remain signaled by gpu_evidence_present / gpu_evidence_stale transitions.
 func AttestationStateDigest(w Workload, runtimeDigest, tlsSPKIHash, receiptKID, ehbpPublicKeySHA256 string, gpu GPUEvidence) (string, error) {
 	state := map[string]any{
 		"compose_digest":         w.ComposeDigest,
@@ -157,7 +162,6 @@ func AttestationStateDigest(w Workload, runtimeDigest, tlsSPKIHash, receiptKID, 
 		"receipt_kid":            receiptKID,
 		"ehbp_public_key_sha256": ehbpPublicKeySHA256,
 		"gpu_evidence_present":   gpu.Bundle != nil,
-		"gpu_evidence_fresh_at":  gpu.FreshAt,
 		"gpu_evidence_stale":     gpu.Stale,
 	}
 	return canonjson.Digest(state)
