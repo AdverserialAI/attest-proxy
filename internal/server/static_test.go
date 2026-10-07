@@ -44,7 +44,7 @@ func newChatTestServer(t *testing.T) (*httptest.Server, string) {
 
 	cfg := testConfig()
 	cfg.Upstream = upstream.URL
-	cfg.ChatHost = "cc-chat.adverserial.ai"
+	cfg.ChatHost = "chat.adverserial.ai"
 	cfg.ChatDocroot = docroot
 	_, ts := newTestServer(t, cfg)
 	return ts, docroot
@@ -70,7 +70,7 @@ func getWithHost(t *testing.T, ts *httptest.Server, host, path string) (int, htt
 
 func TestChatHostServesAsset(t *testing.T) {
 	ts, _ := newChatTestServer(t)
-	status, hdr, body := getWithHost(t, ts, "cc-chat.adverserial.ai", "/_app/app.a1b2c3.js")
+	status, hdr, body := getWithHost(t, ts, "chat.adverserial.ai", "/_app/app.a1b2c3.js")
 	if status != http.StatusOK || body != testAppJS {
 		t.Fatalf("status=%d body=%q", status, body)
 	}
@@ -82,7 +82,7 @@ func TestChatHostServesAsset(t *testing.T) {
 func TestChatHostSPAFallback(t *testing.T) {
 	ts, _ := newChatTestServer(t)
 	for _, p := range []string{"/", "/chat", "/chat/some/deep/route"} {
-		status, hdr, body := getWithHost(t, ts, "cc-chat.adverserial.ai", p)
+		status, hdr, body := getWithHost(t, ts, "chat.adverserial.ai", p)
 		if status != http.StatusOK || body != testIndexHTML {
 			t.Errorf("GET %s: status=%d body=%q", p, status, body)
 		}
@@ -94,7 +94,7 @@ func TestChatHostSPAFallback(t *testing.T) {
 
 func TestChatHostMissingAssetIs404(t *testing.T) {
 	ts, _ := newChatTestServer(t)
-	status, _, _ := getWithHost(t, ts, "cc-chat.adverserial.ai", "/_app/gone.js")
+	status, _, _ := getWithHost(t, ts, "chat.adverserial.ai", "/_app/gone.js")
 	if status != http.StatusNotFound {
 		t.Errorf("missing asset → %d, want 404 (no SPA fallback for asset paths)", status)
 	}
@@ -105,7 +105,7 @@ func TestChatHostMissingAssetIs404(t *testing.T) {
 func TestChatHostAPIRoutesStillWork(t *testing.T) {
 	ts, _ := newChatTestServer(t)
 
-	status, _, body := getWithHost(t, ts, "cc-chat.adverserial.ai", "/v1/models")
+	status, _, body := getWithHost(t, ts, "chat.adverserial.ai", "/v1/models")
 	if status != http.StatusOK {
 		t.Fatalf("/v1/models on chat host → %d", status)
 	}
@@ -114,14 +114,14 @@ func TestChatHostAPIRoutesStillWork(t *testing.T) {
 	}
 
 	// Host with a port must still match.
-	status, _, _ = getWithHost(t, ts, "cc-chat.adverserial.ai:8443", "/v1/models")
+	status, _, _ = getWithHost(t, ts, "chat.adverserial.ai:8443", "/v1/models")
 	if status != http.StatusOK {
 		t.Errorf("/v1/models with ported host → %d", status)
 	}
 
 	// Attestation on the chat host works (public evidence).
 	nonce := b64Of(32)
-	status, _, body = getWithHost(t, ts, "cc-chat.adverserial.ai", "/attestation?nonce="+nonce)
+	status, _, body = getWithHost(t, ts, "chat.adverserial.ai", "/attestation?nonce="+nonce)
 	if status != http.StatusOK || !strings.Contains(body, "verification_receipt") {
 		t.Errorf("/attestation on chat host → %d", status)
 	}
@@ -142,10 +142,10 @@ func TestWrongHostUnaffected(t *testing.T) {
 // TestHostOnlyNormalization covers port stripping and case.
 func TestHostOnlyNormalization(t *testing.T) {
 	cases := map[string]string{
-		"cc-chat.adverserial.ai":      "cc-chat.adverserial.ai",
-		"cc-chat.adverserial.ai:8443": "cc-chat.adverserial.ai",
-		"CC-CHAT.Adverserial.AI:443":  "cc-chat.adverserial.ai",
-		"  cc-chat.adverserial.ai ":   "cc-chat.adverserial.ai",
+		"chat.adverserial.ai":      "chat.adverserial.ai",
+		"chat.adverserial.ai:8443": "chat.adverserial.ai",
+		"CHAT.Adverserial.AI:443":      "chat.adverserial.ai",
+		"  chat.adverserial.ai ":   "chat.adverserial.ai",
 	}
 	for in, want := range cases {
 		if got := hostOnly(in); got != want {

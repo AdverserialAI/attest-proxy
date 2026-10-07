@@ -361,7 +361,7 @@ func (m *mockACME) handler() http.Handler {
 }
 
 func TestFullOrderFlow(t *testing.T) {
-	domains := []string{"cc-api.adverserial.ai", "cc-chat.adverserial.ai"}
+	domains := []string{"api.adverserial.ai", "chat.adverserial.ai"}
 	mock := newMockACME(t, domains)
 	ts := httptest.NewServer(mock.handler())
 	defer ts.Close()
@@ -430,7 +430,7 @@ func TestFullOrderFlow(t *testing.T) {
 // TestOrderFailsWhenDNSSetFails: a provider error aborts the order before any
 // challenge is notified.
 func TestOrderFailsWhenDNSSetFails(t *testing.T) {
-	domains := []string{"cc-api.adverserial.ai"}
+	domains := []string{"api.adverserial.ai"}
 	mock := newMockACME(t, domains)
 	ts := httptest.NewServer(mock.handler())
 	defer ts.Close()

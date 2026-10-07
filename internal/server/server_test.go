@@ -109,13 +109,13 @@ func TestEHBPReferenceTransportEncryptsBothDirections(t *testing.T) {
 
 func TestEHBPCORSAllowsAndExposesProtocolHeaders(t *testing.T) {
 	cfg := testConfig()
-	cfg.CORSAllowOrigin = "https://cc-chat.adverserial.ai"
+	cfg.CORSAllowOrigin = "https://chat.adverserial.ai"
 	_, ts := newTestServer(t, cfg)
 	req, err := http.NewRequest(http.MethodOptions, ts.URL+"/v1/chat/completions", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Origin", "https://cc-chat.adverserial.ai")
+	req.Header.Set("Origin", "https://chat.adverserial.ai")
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func testConfig() config.Config {
 		ModelDigest:     "sha256:modeldigest",
 		RuntimeDigest:   "sha256:runtimedigest",
 		ReceiptIssuer:   "https://verify.adverserial.ai",
-		ReceiptAudience: "cc-chat.adverserial.ai",
+		ReceiptAudience: "chat.adverserial.ai",
 		DevMode:         true,
 	}
 }
@@ -324,7 +324,7 @@ func TestAttestationEndToEnd(t *testing.T) {
 
 	// Claims per the client contract.
 	if claims["iss"] != "https://verify.adverserial.ai" ||
-		claims["aud"] != "cc-chat.adverserial.ai" ||
+		claims["aud"] != "chat.adverserial.ai" ||
 		claims["nonce"] != nonce ||
 		claims["verdict"] != "verified" ||
 		claims["model_id"] != "lordx64/cyberglm" ||
@@ -418,7 +418,7 @@ func TestSPKIFollowsActiveCert(t *testing.T) {
 	}
 
 	// Simulate an ACME renewal: swap in a fresh certificate.
-	newCert, _, err := GenerateSelfSigned([]string{"cc-api.adverserial.ai"})
+	newCert, _, err := GenerateSelfSigned([]string{"api.adverserial.ai"})
 	if err != nil {
 		t.Fatal(err)
 	}

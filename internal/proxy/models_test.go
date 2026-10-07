@@ -22,12 +22,12 @@ func testAugmenter(allowed ...string) *ModelsAugmenter {
 		"kid": testKid,
 	}
 	a := &ModelsAugmenter{
-		AttestationURL:  "https://cc-api.adverserial.ai/attestation",
+		AttestationURL:  "https://api.adverserial.ai/attestation",
 		VerificationURL: "https://verify.adverserial.ai",
 		ReceiptIssuer:   "https://verify.adverserial.ai",
-		ReceiptAudience: "cc-chat.adverserial.ai",
+		ReceiptAudience: "chat.adverserial.ai",
 		TrustedKeys:     map[string]any{testKid: jwk},
-		Endpoint:        "https://cc-api.adverserial.ai",
+		Endpoint:        "https://api.adverserial.ai",
 		ModelDigest:     "sha256:modeldigest",
 		RuntimeDigest:   "sha256:runtimedigest",
 	}
@@ -126,10 +126,10 @@ func TestModelsAugmentation(t *testing.T) {
 	if !ok {
 		t.Fatalf("confidential_verification missing: %v", meta)
 	}
-	if cv["attestation_url"] != "https://cc-api.adverserial.ai/attestation" ||
+	if cv["attestation_url"] != "https://api.adverserial.ai/attestation" ||
 		cv["verification_url"] != "https://verify.adverserial.ai" ||
 		cv["receipt_issuer"] != "https://verify.adverserial.ai" ||
-		cv["receipt_audience"] != "cc-chat.adverserial.ai" {
+		cv["receipt_audience"] != "chat.adverserial.ai" {
 		t.Errorf("cv block = %v", cv)
 	}
 	keys, ok := cv["trusted_receipt_keys"].(map[string]any)
@@ -141,7 +141,7 @@ func TestModelsAugmentation(t *testing.T) {
 		t.Fatal("expected block missing")
 	}
 	if expected["model_id"] != "lordx64/cyberglm" ||
-		expected["endpoint"] != "https://cc-api.adverserial.ai" ||
+		expected["endpoint"] != "https://api.adverserial.ai" ||
 		expected["model_digest"] != "sha256:modeldigest" ||
 		expected["runtime_digest"] != "sha256:runtimedigest" {
 		t.Errorf("expected = %v", expected)

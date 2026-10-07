@@ -127,7 +127,7 @@ type Config struct {
 
 	// Chat vhost: when both are set, requests with Host == ChatHost get the
 	// static SPA from ChatDocroot (API routes still reach the API handlers).
-	ChatHost    string // CHAT_HOST, e.g. cc-chat.adverserial.ai
+	ChatHost    string // CHAT_HOST, e.g. chat.adverserial.ai
 	ChatDocroot string // CHAT_DOCROOT, e.g. /data/chat-dist
 
 	// GPUEvidenceFile is the cached NRAS EAT bundle written by the collector
@@ -156,7 +156,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ModelManifestFile:  getenv("MODEL_MANIFEST_FILE"),
 		RuntimeDigest:      getenv("RUNTIME_DIGEST"),
 		ReceiptIssuer:      orDefault(getenv("RECEIPT_ISSUER"), "https://verify.adverserial.ai"),
-		ReceiptAudience:    orDefault(getenv("RECEIPT_AUDIENCE"), "https://cc-chat.adverserial.ai"),
+		ReceiptAudience:    orDefault(getenv("RECEIPT_AUDIENCE"), "https://chat.adverserial.ai"),
 		ReceiptSigningSeed: getenv("RECEIPT_SIGNING_SEED"),
 		DstackSocket:       orDefault(getenv("DSTACK_SOCKET"), "/var/run/dstack.sock"),
 		CORSAllowOrigin:    getenv("CORS_ALLOW_ORIGIN"),
@@ -178,10 +178,10 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		BillingWriterSecret:    getenv("BILLING_WRITER_SECRET"),
 		EntitlementJWKS:        getenv("ENTITLEMENT_JWKS_JSON"),
 		EntitlementIssuer:      orDefault(getenv("ENTITLEMENT_ISSUER"), "https://billing.adverserial.ai"),
-		EntitlementAudience:    orDefault(getenv("ENTITLEMENT_AUDIENCE"), "https://cc-api.adverserial.ai"),
+		EntitlementAudience:    orDefault(getenv("ENTITLEMENT_AUDIENCE"), "https://api.adverserial.ai"),
 		EntitlementReplayDir:   getenv("ENTITLEMENT_REPLAY_DIR"),
 		MeterSigningSeed:       getenv("METER_SIGNING_SEED"),
-		MeterIssuer:            orDefault(getenv("METER_ISSUER"), "https://cc-api.adverserial.ai"),
+		MeterIssuer:            orDefault(getenv("METER_ISSUER"), "https://api.adverserial.ai"),
 		MeterAudience:          orDefault(getenv("METER_AUDIENCE"), "https://billing.adverserial.ai"),
 		MeterOutboxDir:         getenv("METER_OUTBOX_DIR"),
 		MeterURL:               getenv("METER_URL"),

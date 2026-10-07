@@ -15,8 +15,8 @@ import (
 const gandiDefaultBaseURL = "https://api.gandi.net"
 
 // ChallengeName computes the relative _acme-challenge TXT record name for
-// domain inside zone: cc-api.adverserial.ai in zone adverserial.ai →
-// "_acme-challenge.cc-api". The apex maps to "_acme-challenge". Matching is
+// domain inside zone: api.adverserial.ai in zone adverserial.ai →
+// "_acme-challenge.api". The apex maps to "_acme-challenge". Matching is
 // case-insensitive and ignores a trailing dot.
 func ChallengeName(domain, zone string) (string, error) {
 	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")

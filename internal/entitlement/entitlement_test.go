@@ -26,11 +26,11 @@ func TestValidateAndConsume(t *testing.T) {
 	now := time.Unix(1_760_000_000, 0)
 	spki := "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	claims := map[string]any{
-		"iss": "https://billing.adverserial.ai", "aud": "https://cc-api.adverserial.ai", "typ": "adverserial-confidential-entitlement/v1",
+		"iss": "https://billing.adverserial.ai", "aud": "https://api.adverserial.ai", "typ": "adverserial-confidential-entitlement/v1",
 		"jti": "reservation-1", "model": "lordx64/cyberglm", "max_input_tokens": 1024, "max_output_tokens": 64, "max_requests": 1,
 		"cnf": map[string]string{"tls_spki_sha256": spki}, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix(),
 	}
-	v := Validator{Keys: map[string]ed25519.PublicKey{"billing-1": pub}, Issuer: "https://billing.adverserial.ai", Audience: "https://cc-api.adverserial.ai", Now: func() time.Time { return now }}
+	v := Validator{Keys: map[string]ed25519.PublicKey{"billing-1": pub}, Issuer: "https://billing.adverserial.ai", Audience: "https://api.adverserial.ai", Now: func() time.Time { return now }}
 	got, err := v.Validate(testToken(t, private, "billing-1", claims), "lordx64/cyberglm", spki, 512, 64)
 	if err != nil {
 		t.Fatal(err)

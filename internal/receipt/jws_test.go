@@ -21,7 +21,7 @@ func TestMintRoundTrip(t *testing.T) {
 	}
 	claims := map[string]any{
 		"iss":             "https://verify.adverserial.ai",
-		"aud":             "cc-chat.adverserial.ai",
+		"aud":             "chat.adverserial.ai",
 		"nonce":           "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		"verdict":         "verified",
 		"iat":             int64(1759999000),

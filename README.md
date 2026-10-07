@@ -53,7 +53,7 @@ docker run --rm -p 8443:8443 \
 | `POLICY_ID` | `adverserial-policy/dev` | Policy identifier from the public policy registry |
 | `ENDPOINT` | `https://api.adverserial.ai` | Public base URL (receipt claim `endpoint`) |
 | `RECEIPT_ISSUER` | `https://verify.adverserial.ai` | Receipt claim `iss` |
-| `RECEIPT_AUDIENCE` | `cc-chat.adverserial.ai` | Receipt claim `aud` |
+| `RECEIPT_AUDIENCE` | `https://chat.adverserial.ai` | Receipt claim `aud` |
 | `RECEIPT_SIGNING_SEED` | _(empty)_ | Sealed 32-byte base64url seed for the stable P-256 receipt signer. Required in `CONFIDENTIAL_MODE`; publish only the derived public JWK in the active policy. |
 | `COMPOSE_DIGEST` | _(empty)_ | `sha256:` digest of the dstack compose config |
 | `MODEL_DIGEST` | _(empty)_ | `sha256:` digest of the model artifact |
@@ -80,10 +80,10 @@ docker run --rm -p 8443:8443 \
 | `CONFIDENTIAL_MODE` | `0` | Enable local billing-entitlement verification. Requires `AUTH_REQUIRED=0`; raw customer API keys are rejected at this boundary. |
 | `ENTITLEMENT_JWKS_JSON` | — | Billing's public Ed25519 JWK set; parsed at startup and never fetched on the prompt path. |
 | `ENTITLEMENT_ISSUER` | `https://billing.adverserial.ai` | Required entitlement issuer. |
-| `ENTITLEMENT_AUDIENCE` | `https://cc-api.adverserial.ai` | Required entitlement audience. |
+| `ENTITLEMENT_AUDIENCE` | `https://api.adverserial.ai` | Required entitlement audience. |
 | `ENTITLEMENT_REPLAY_DIR` | — | Persistent, private directory for atomically consuming one-use entitlement IDs. |
 | `METER_SIGNING_SEED` | — | Sealed 32-byte base64url Ed25519 seed for count-only meter records. Never commit it. |
-| `METER_ISSUER` | `https://cc-api.adverserial.ai` | Meter-event issuer. |
+| `METER_ISSUER` | `https://api.adverserial.ai` | Meter-event issuer. |
 | `METER_AUDIENCE` | `https://billing.adverserial.ai` | Meter-event audience. |
 | `METER_OUTBOX_DIR` | — | Persistent, private directory for signed meter retry records. |
 | `METER_URL` | — | Fixed `https://meter-ingress…` origin. Required in confidential mode; it must not point to Heroku billing. |
@@ -91,7 +91,7 @@ docker run --rm -p 8443:8443 \
 | `METER_CLIENT_CERT_FILE` | — | File-mode alternative for a CVM-managed secret store; cannot be combined with `METER_TLS_BUNDLE_B64`. |
 | `METER_CLIENT_KEY_FILE` | — | File-mode alternative for a CVM-managed secret store; cannot be combined with `METER_TLS_BUNDLE_B64`. |
 | `METER_SERVER_CA_FILE` | — | File-mode alternative for a CVM-managed secret store; cannot be combined with `METER_TLS_BUNDLE_B64`. |
-| `CHAT_HOST` | _(empty = disabled)_ | Static-chat virtual host, e.g. `cc-chat.adverserial.ai` |
+| `CHAT_HOST` | _(empty = disabled)_ | Static-chat virtual host, e.g. `chat.adverserial.ai` |
 | `CHAT_DOCROOT` | _(empty = disabled)_ | SPA docroot for `CHAT_HOST` (set both or neither) |
 | `GPU_EVIDENCE_FILE` | `/data/gpu-evidence.json` | Cached NRAS EAT bundle from the collector sidecar (embedded as `gpu_evidence`) |
 | `NV_ATTESTATION_SERVICE_KEY` | — | Sealed NVIDIA remote-attestation service key; required by the collector, never by the proxy |

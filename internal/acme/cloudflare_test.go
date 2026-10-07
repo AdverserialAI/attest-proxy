@@ -102,14 +102,14 @@ func newCloudflareStub(t *testing.T, records []cfDNSRecord) (*httptest.Server, *
 func TestCloudflareSetTXTCreates(t *testing.T) {
 	srv, stub := newCloudflareStub(t, nil)
 	p := &CloudflareProvider{Token: "test-token", Zone: "adverserial.ai", BaseURL: srv.URL}
-	if err := p.SetTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123"); err != nil {
+	if err := p.SetTXT(context.Background(), "_acme-challenge.api", "txt-value-123"); err != nil {
 		t.Fatalf("SetTXT: %v", err)
 	}
 	if len(stub.records) != 1 {
 		t.Fatalf("records = %v", stub.records)
 	}
 	rec := stub.records[0]
-	if rec.Type != "TXT" || rec.Name != "_acme-challenge.cc-api.adverserial.ai" || rec.Content != "txt-value-123" {
+	if rec.Type != "TXT" || rec.Name != "_acme-challenge.api.adverserial.ai" || rec.Content != "txt-value-123" {
 		t.Errorf("created record = %+v", rec)
 	}
 	last := stub.requests[len(stub.requests)-1]
@@ -120,10 +120,10 @@ func TestCloudflareSetTXTCreates(t *testing.T) {
 
 // TestCloudflareSetTXTUpdates: an existing record at the name → PUT to its URL.
 func TestCloudflareSetTXTUpdates(t *testing.T) {
-	existing := []cfDNSRecord{{ID: "rec-9", Type: "TXT", Name: "_acme-challenge.cc-api.adverserial.ai", Content: "stale"}}
+	existing := []cfDNSRecord{{ID: "rec-9", Type: "TXT", Name: "_acme-challenge.api.adverserial.ai", Content: "stale"}}
 	srv, stub := newCloudflareStub(t, existing)
 	p := &CloudflareProvider{Token: "test-token", Zone: "adverserial.ai", BaseURL: srv.URL}
-	if err := p.SetTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123"); err != nil {
+	if err := p.SetTXT(context.Background(), "_acme-challenge.api", "txt-value-123"); err != nil {
 		t.Fatalf("SetTXT: %v", err)
 	}
 	if len(stub.records) != 1 || stub.records[0].ID != "rec-9" || stub.records[0].Content != "txt-value-123" {
@@ -158,7 +158,7 @@ func TestCloudflareSetTXTRequestShape(t *testing.T) {
 	defer stub.Close()
 
 	p := &CloudflareProvider{Token: "test-token", Zone: "adverserial.ai", BaseURL: stub.URL}
-	if err := p.SetTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123"); err != nil {
+	if err := p.SetTXT(context.Background(), "_acme-challenge.api", "txt-value-123"); err != nil {
 		t.Fatalf("SetTXT: %v", err)
 	}
 	if gotAuth != "Bearer test-token" {
@@ -167,7 +167,7 @@ func TestCloudflareSetTXTRequestShape(t *testing.T) {
 	if gotCT != "application/json" {
 		t.Errorf("Content-Type = %q", gotCT)
 	}
-	want := map[string]any{"type": "TXT", "name": "_acme-challenge.cc-api.adverserial.ai", "content": "txt-value-123", "ttl": float64(120)}
+	want := map[string]any{"type": "TXT", "name": "_acme-challenge.api.adverserial.ai", "content": "txt-value-123", "ttl": float64(120)}
 	for k, v := range want {
 		if gotBody[k] != v {
 			t.Errorf("body[%s] = %v, want %v", k, gotBody[k], v)
@@ -180,10 +180,10 @@ func TestCloudflareZoneIDCached(t *testing.T) {
 	srv, stub := newCloudflareStub(t, nil)
 	p := &CloudflareProvider{Token: "test-token", Zone: "adverserial.ai", BaseURL: srv.URL}
 	for _, value := range []string{"v1", "v2"} {
-		if err := p.SetTXT(context.Background(), "_acme-challenge.cc-api", value); err != nil {
+		if err := p.SetTXT(context.Background(), "_acme-challenge.api", value); err != nil {
 			t.Fatalf("SetTXT: %v", err)
 		}
-		if err := p.DeleteTXT(context.Background(), "_acme-challenge.cc-api", value); err != nil {
+		if err := p.DeleteTXT(context.Background(), "_acme-challenge.api", value); err != nil {
 			t.Fatalf("DeleteTXT: %v", err)
 		}
 	}
@@ -195,25 +195,25 @@ func TestCloudflareZoneIDCached(t *testing.T) {
 // TestCloudflareDeleteTXT: only content-matching records are deleted; an
 // already-empty name is success.
 func TestCloudflareDeleteTXT(t *testing.T) {
-	fqdn := "_acme-challenge.cc-api.adverserial.ai"
+	fqdn := "_acme-challenge.api.adverserial.ai"
 	records := []cfDNSRecord{
 		{ID: "rec-1", Type: "TXT", Name: fqdn, Content: "txt-value-123"},
 		{ID: "rec-2", Type: "TXT", Name: fqdn, Content: "other-value"},
 	}
 	srv, stub := newCloudflareStub(t, records)
 	p := &CloudflareProvider{Token: "test-token", Zone: "adverserial.ai", BaseURL: srv.URL}
-	if err := p.DeleteTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123"); err != nil {
+	if err := p.DeleteTXT(context.Background(), "_acme-challenge.api", "txt-value-123"); err != nil {
 		t.Fatalf("DeleteTXT: %v", err)
 	}
 	if len(stub.records) != 1 || stub.records[0].ID != "rec-2" {
 		t.Errorf("records = %+v, want only rec-2 kept", stub.records)
 	}
 	// Deleting again (name now absent from the value filter) is a no-op success.
-	if err := p.DeleteTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123"); err != nil {
+	if err := p.DeleteTXT(context.Background(), "_acme-challenge.api", "txt-value-123"); err != nil {
 		t.Fatalf("DeleteTXT (idempotent): %v", err)
 	}
 	// Empty value deletes every record at the name.
-	if err := p.DeleteTXT(context.Background(), "_acme-challenge.cc-api", ""); err != nil {
+	if err := p.DeleteTXT(context.Background(), "_acme-challenge.api", ""); err != nil {
 		t.Fatalf("DeleteTXT (all values): %v", err)
 	}
 	if len(stub.records) != 0 {
@@ -229,7 +229,7 @@ func TestCloudflareDeleteTXTTolerates404(t *testing.T) {
 		case r.URL.Path == "/zones":
 			_, _ = w.Write([]byte(`{"success":true,"errors":[],"result":[{"id":"zone-1"}]}`))
 		case r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`{"success":true,"errors":[],"result":[{"id":"rec-1","type":"TXT","name":"_acme-challenge.cc-api.adverserial.ai","content":"v"}]}`))
+			_, _ = w.Write([]byte(`{"success":true,"errors":[],"result":[{"id":"rec-1","type":"TXT","name":"_acme-challenge.api.adverserial.ai","content":"v"}]}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"success":false,"errors":[{"code":81044,"message":"Record does not exist."}],"result":null}`))
@@ -237,7 +237,7 @@ func TestCloudflareDeleteTXTTolerates404(t *testing.T) {
 	}))
 	defer stub.Close()
 	p := &CloudflareProvider{Token: "test-token", Zone: "adverserial.ai", BaseURL: stub.URL}
-	if err := p.DeleteTXT(context.Background(), "_acme-challenge.cc-api", "v"); err != nil {
+	if err := p.DeleteTXT(context.Background(), "_acme-challenge.api", "v"); err != nil {
 		t.Fatalf("DeleteTXT (404): %v", err)
 	}
 }

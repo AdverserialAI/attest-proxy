@@ -41,7 +41,7 @@ func newReceiptRig(t *testing.T, upstream *httptest.Server) *receiptRig {
 		Receipts: &ReceiptConfig{
 			Signer:   signer,
 			Issuer:   "https://verify.adverserial.ai",
-			Audience: "cc-chat.adverserial.ai",
+			Audience: "chat.adverserial.ai",
 			PolicyID: "adverserial-policy/2026-10-04",
 			StateDigest: func() (string, string) {
 				return "sha256:testSPKI", "sha256:testStateDigest"
@@ -129,7 +129,7 @@ func TestNonStreamReceiptHeader(t *testing.T) {
 
 	if claims["v"] != float64(1) ||
 		claims["iss"] != "https://verify.adverserial.ai" ||
-		claims["aud"] != "cc-chat.adverserial.ai" ||
+		claims["aud"] != "chat.adverserial.ai" ||
 		claims["request_nonce"] != receiptTestNonce ||
 		claims["request_body_hash"] != sha256b64([]byte(receiptTestBody)) ||
 		claims["response_hash"] != sha256b64([]byte(respBody)) ||

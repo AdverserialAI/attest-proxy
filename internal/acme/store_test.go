@@ -71,7 +71,7 @@ func TestAccountKeyPersistence(t *testing.T) {
 
 // TestLoadCertPickFromDiskVsReissue: the boot/renewal decision matrix.
 func TestLoadCertPickFromDiskVsReissue(t *testing.T) {
-	domains := []string{"cc-api.adverserial.ai", "cc-chat.adverserial.ai"}
+	domains := []string{"api.adverserial.ai", "chat.adverserial.ai"}
 	now := time.Now()
 
 	t.Run("valid cert is picked from disk", func(t *testing.T) {
@@ -104,7 +104,7 @@ func TestLoadCertPickFromDiskVsReissue(t *testing.T) {
 
 	t.Run("domain mismatch triggers reissue", func(t *testing.T) {
 		store := Store{Dir: t.TempDir()}
-		writeTestCert(t, store, []string{"cc-api.adverserial.ai"}, 90*24*time.Hour)
+		writeTestCert(t, store, []string{"api.adverserial.ai"}, 90*24*time.Hour)
 		if _, ok := store.LoadCert(domains, DefaultRenewBefore, now); ok {
 			t.Fatal("cert not covering all domains should be reissued")
 		}

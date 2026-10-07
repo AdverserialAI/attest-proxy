@@ -12,11 +12,11 @@ func TestChallengeName(t *testing.T) {
 	cases := []struct {
 		domain, zone, want string
 	}{
-		{"cc-api.adverserial.ai", "adverserial.ai", "_acme-challenge.cc-api"},
-		{"cc-chat.adverserial.ai", "adverserial.ai", "_acme-challenge.cc-chat"},
+		{"api.adverserial.ai", "adverserial.ai", "_acme-challenge.api"},
+		{"chat.adverserial.ai", "adverserial.ai", "_acme-challenge.chat"},
 		{"adverserial.ai", "adverserial.ai", "_acme-challenge"},
 		{"a.b.adverserial.ai", "adverserial.ai", "_acme-challenge.a.b"},
-		{"CC-API.Adverserial.AI.", "Adverserial.AI.", "_acme-challenge.cc-api"}, // case + trailing dot
+		{"API.Adverserial.AI.", "Adverserial.AI.", "_acme-challenge.api"}, // case + trailing dot
 	}
 	for _, c := range cases {
 		got, err := ChallengeName(c.domain, c.zone)
@@ -59,7 +59,7 @@ func TestGandiSetTXT(t *testing.T) {
 	defer stub.Close()
 
 	p := &GandiProvider{PAT: "test-pat", Zone: "adverserial.ai", BaseURL: stub.URL}
-	err := p.SetTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123")
+	err := p.SetTXT(context.Background(), "_acme-challenge.api", "txt-value-123")
 	if err != nil {
 		t.Fatalf("SetTXT: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestGandiSetTXT(t *testing.T) {
 	if gotMethod != http.MethodPut {
 		t.Errorf("method = %s, want PUT", gotMethod)
 	}
-	wantPath := "/v5/livedns/domains/adverserial.ai/records/_acme-challenge.cc-api/TXT"
+	wantPath := "/v5/livedns/domains/adverserial.ai/records/_acme-challenge.api/TXT"
 	if gotPath != wantPath {
 		t.Errorf("path = %s, want %s", gotPath, wantPath)
 	}
@@ -96,7 +96,7 @@ func TestGandiDeleteTXT(t *testing.T) {
 			w.WriteHeader(status)
 		}))
 		p := &GandiProvider{PAT: "test-pat", Zone: "adverserial.ai", BaseURL: stub.URL}
-		err := p.DeleteTXT(context.Background(), "_acme-challenge.cc-api", "txt-value-123")
+		err := p.DeleteTXT(context.Background(), "_acme-challenge.api", "txt-value-123")
 		stub.Close()
 		if err != nil {
 			t.Fatalf("DeleteTXT (status %d): %v", status, err)
@@ -104,7 +104,7 @@ func TestGandiDeleteTXT(t *testing.T) {
 		if gotMethod != http.MethodDelete {
 			t.Errorf("method = %s, want DELETE", gotMethod)
 		}
-		if gotPath != "/v5/livedns/domains/adverserial.ai/records/_acme-challenge.cc-api/TXT" {
+		if gotPath != "/v5/livedns/domains/adverserial.ai/records/_acme-challenge.api/TXT" {
 			t.Errorf("path = %s", gotPath)
 		}
 		if gotAuth != "Bearer test-pat" {

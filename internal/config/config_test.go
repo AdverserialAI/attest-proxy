@@ -36,7 +36,7 @@ func TestDefaults(t *testing.T) {
 		"Upstream":        "http://127.0.0.1:30000",
 		"ModelID":         "lordx64/cyberglm",
 		"ReceiptIssuer":   "https://verify.adverserial.ai",
-		"ReceiptAudience": "https://cc-chat.adverserial.ai",
+		"ReceiptAudience": "https://chat.adverserial.ai",
 		"DstackSocket":    "/var/run/dstack.sock",
 	}
 	for k, got := range checks {
@@ -172,7 +172,7 @@ func TestACMEValidation(t *testing.T) {
 		if env == nil {
 			env = map[string]string{}
 		}
-		env["ACME_DOMAINS"] = "cc-api.adverserial.ai,cc-chat.adverserial.ai"
+		env["ACME_DOMAINS"] = "api.adverserial.ai,chat.adverserial.ai"
 		return noAuth(func(k string) string { return env[k] })
 	}
 
@@ -201,7 +201,7 @@ func TestACMEValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromEnv: %v", err)
 	}
-	if len(cfg.ACMEDomains) != 2 || cfg.ACMEDomains[0] != "cc-api.adverserial.ai" {
+	if len(cfg.ACMEDomains) != 2 || cfg.ACMEDomains[0] != "api.adverserial.ai" {
 		t.Errorf("ACMEDomains = %v", cfg.ACMEDomains)
 	}
 
@@ -219,7 +219,7 @@ func TestACMEValidation(t *testing.T) {
 func TestACMEDNSProviderSelection(t *testing.T) {
 	withDomains := func(env map[string]string) func(string) string {
 		base := map[string]string{
-			"ACME_DOMAINS": "cc-api.adverserial.ai",
+			"ACME_DOMAINS": "api.adverserial.ai",
 			"ACME_EMAIL":   "ops@adverserial.ai",
 			"CERT_DIR":     "/data/certs",
 		}
@@ -315,7 +315,7 @@ func TestAuthRequiredDefaultOn(t *testing.T) {
 func TestChatHostValidation(t *testing.T) {
 	// Only one of the pair set → error.
 	for _, env := range []map[string]string{
-		{"CHAT_HOST": "cc-chat.adverserial.ai"},
+		{"CHAT_HOST": "chat.adverserial.ai"},
 		{"CHAT_DOCROOT": "/data/chat-dist"},
 	} {
 		if _, err := FromEnv(noAuth(func(k string) string { return env[k] })); err == nil {
@@ -324,14 +324,14 @@ func TestChatHostValidation(t *testing.T) {
 	}
 	// Both set → ok; host lowercased.
 	env := map[string]string{
-		"CHAT_HOST":    "CC-Chat.Adverserial.AI",
+		"CHAT_HOST":    "Chat.Adverserial.AI",
 		"CHAT_DOCROOT": "/data/chat-dist",
 	}
 	cfg, err := FromEnv(noAuth(func(k string) string { return env[k] }))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ChatHost != "cc-chat.adverserial.ai" || cfg.ChatDocroot != "/data/chat-dist" {
+	if cfg.ChatHost != "chat.adverserial.ai" || cfg.ChatDocroot != "/data/chat-dist" {
 		t.Errorf("chat vhost = %q %q", cfg.ChatHost, cfg.ChatDocroot)
 	}
 }
