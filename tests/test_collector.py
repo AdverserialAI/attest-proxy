@@ -59,10 +59,22 @@ def make_fake_sdk(fail_attest=False, gpu_count=8):
             return True
 
         def get_token(self):
-            # Nested ["JWT", ...] + claims structure, one EAT per GPU.
+            # Nested ["JWT", ...] + claims structure, one NVIDIA-shaped
+            # (ES384 + kid) EAT per GPU, plus an HS256 session token that the
+            # collector must exclude.
+            import base64 as _b
+            import json as _j
+
+            def fake_eat(i):
+                header = _b.urlsafe_b64encode(
+                    _j.dumps({"alg": "ES384", "kid": f"nv-eat-kid-test-{i}"}).encode()
+                ).rstrip(b"=").decode()
+                return f"{header}.e30.c2ln"
+
+            session = _b.urlsafe_b64encode(_j.dumps({"alg": "HS256"}).encode()).rstrip(b"=").decode() + ".c2Vzc2lvbg.c2ln"
             return {
                 "GPU": {
-                    "JWT": [f"eyJhbGciOiJIUzI1NiJ9.eyJncHUiOnt9fQ.c2ln{i}" for i in range(gpu_count)]
+                    "JWT": [fake_eat(i) for i in range(gpu_count)] + [session]
                 },
                 "Claims": {"x-nvidia-attestation": "ok"},
             }
