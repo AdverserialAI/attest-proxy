@@ -41,24 +41,34 @@ DEFAULT_OUT = "/data/gpu-evidence.json"
 DEFAULT_INTERVAL = 300  # seconds; NRAS round-trips take seconds, so 5 min is the freshness/cost tradeoff
 
 
-def extract_jwts(node):
+def extract_jwts(node, _depth=0):
     """Walk the get_token() structure and collect EAT JWT strings.
 
     nv_attestation_sdk returns a nested ["JWT", token(s)] + claims structure;
     with 8 GPUs there is one NVIDIA-signed EAT per GPU. We collect defensively
     by shape (three base64url segments, JWTs start with "eyJ") rather than by
-    key path, so SDK layout changes don't break us.
+    key path, so SDK layout changes don't break us. get_token() itself returns
+    a JSON-encoded string, so string nodes that look like JSON are decoded and
+    walked recursively.
     """
     found = []
+    if _depth > 12:
+        return found
     if isinstance(node, str):
         if node.startswith("eyJ") and node.count(".") == 2:
             found.append(node)
+        elif node[:1] in "[{":
+            try:
+                decoded = json.loads(node)
+            except ValueError:
+                return found
+            found.extend(extract_jwts(decoded, _depth + 1))
     elif isinstance(node, dict):
         for value in node.values():
-            found.extend(extract_jwts(value))
+            found.extend(extract_jwts(value, _depth + 1))
     elif isinstance(node, (list, tuple)):
         for value in node:
-            found.extend(extract_jwts(value))
+            found.extend(extract_jwts(value, _depth + 1))
     return found
 
 

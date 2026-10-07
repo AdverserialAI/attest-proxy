@@ -160,6 +160,17 @@ def test_extract_jwts_shapes(collector):
     assert collector.extract_jwts(node) == ["eyJ.x.y", "eyJ.p.q"]
 
 
+def test_extract_jwts_decodes_json_encoded_token_string(collector):
+    # nv_attestation_sdk get_token() returns a JSON string, not an object.
+    token = json.dumps(["JWT", {"NRAS": [{"eat": "eyJ.a.b"}, "junk", ["eyJ.c.d"]]}])
+    assert collector.extract_jwts(token) == ["eyJ.a.b", "eyJ.c.d"]
+
+
+def test_extract_jwts_tolerates_invalid_json_string(collector):
+    assert collector.extract_jwts("[not json") == []
+    assert collector.extract_jwts("plain text") == []
+
+
 def test_missing_service_key_fails_closed(monkeypatch):
     pkg, sub = make_fake_sdk()
     monkeypatch.setitem(sys.modules, "nv_attestation_sdk", pkg)
