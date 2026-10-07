@@ -156,7 +156,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ModelManifestFile:  getenv("MODEL_MANIFEST_FILE"),
 		RuntimeDigest:      getenv("RUNTIME_DIGEST"),
 		ReceiptIssuer:      orDefault(getenv("RECEIPT_ISSUER"), "https://verify.adverserial.ai"),
-		ReceiptAudience:    orDefault(getenv("RECEIPT_AUDIENCE"), "cc-chat.adverserial.ai"),
+		ReceiptAudience:    orDefault(getenv("RECEIPT_AUDIENCE"), "https://cc-chat.adverserial.ai"),
 		ReceiptSigningSeed: getenv("RECEIPT_SIGNING_SEED"),
 		DstackSocket:       orDefault(getenv("DSTACK_SOCKET"), "/var/run/dstack.sock"),
 		CORSAllowOrigin:    getenv("CORS_ALLOW_ORIGIN"),
