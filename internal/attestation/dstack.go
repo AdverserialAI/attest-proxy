@@ -58,14 +58,16 @@ type quoteResponse struct {
 	Error    string          `json:"error"`
 }
 
-// Quote implements QuoteSource: POST http://dstack/Quote with the hex-encoded
-// report_data.
+// Quote implements QuoteSource: POST http://dstack/GetQuote with the hex-encoded
+// report_data, per the dstack guest-agent frozen v0 API (also served at
+// /v0/GetQuote; /Quote is the retired prpc path and returns
+// "Service not found" on dstack 0.5.x).
 func (c *DstackClient) Quote(ctx context.Context, reportData [64]byte) (Quote, error) {
 	body, err := json.Marshal(quoteRequest{ReportData: hex.EncodeToString(reportData[:])})
 	if err != nil {
 		return Quote{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://dstack/Quote", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://dstack/GetQuote", bytes.NewReader(body))
 	if err != nil {
 		return Quote{}, err
 	}

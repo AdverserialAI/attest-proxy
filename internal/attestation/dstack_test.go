@@ -41,7 +41,7 @@ func serveFakeAgent(t *testing.T, handler http.HandlerFunc) string {
 func TestDstackClientQuote(t *testing.T) {
 	var gotBody quoteRequest
 	sock := serveFakeAgent(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/Quote" {
+		if r.Method != http.MethodPost || r.URL.Path != "/GetQuote" {
 			http.Error(w, "wrong route", http.StatusNotFound)
 			return
 		}
