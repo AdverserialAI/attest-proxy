@@ -52,6 +52,24 @@ func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *Usag
 			return nil
 		}
 	}
+	// The cors middleware owns CORS at the edge; the upstream model server
+	// mirrors its own Access-Control headers, which would otherwise duplicate
+	// Access-Control-Allow-Origin and break browser clients.
+	stripCORS := func(resp *http.Response) {
+		for h := range resp.Header {
+			if strings.HasPrefix(strings.ToLower(h), "access-control-") {
+				resp.Header.Del(h)
+			}
+		}
+	}
+	baseModify := rp.ModifyResponse
+	rp.ModifyResponse = func(resp *http.Response) error {
+		stripCORS(resp)
+		if baseModify != nil {
+			return baseModify(resp)
+		}
+		return nil
+	}
 
 	// 100ms flush keeps SSE-style streaming responsive even when the upstream
 	// does not flush explicitly; event-stream responses flush immediately.

@@ -578,3 +578,36 @@ func TestRequestReceiptThroughFullHandler(t *testing.T) {
 		t.Errorf("binding SPKI %v != evidence SPKI %v", binding["tls_spki_sha256"], attBody.Evidence["tls_spki_sha256"])
 	}
 }
+
+// The public edge must never expose the upstream's native endpoints: SGLang's
+// /generate, /vertex_generate, /invocations and its admin/memory endpoints are
+// refused before reaching the model, while /v1/ keeps flowing through the
+// gate. Anything else fails closed.
+func TestFencedAPIBlocksNativeSGLangEndpoints(t *testing.T) {
+	_, ts := newTestServer(t, testConfig())
+	for _, p := range []string{"/generate", "/vertex_generate", "/invocations", "/get_server_info", "/get_model_info", "/flush_cache", "/release_memory_occupation", "/get_weights_by_name", "/health_generate"} {
+		for _, m := range []string{http.MethodGet, http.MethodPost} {
+			req, err := http.NewRequest(m, ts.URL+p, strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", m, p, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("%s %s = %d, want 404 (native endpoints must never leak)", m, p, resp.StatusCode)
+			}
+		}
+	}
+	// the model API surface is still reachable (gated, not fenced off)
+	resp, err := http.Get(ts.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		t.Error("/v1/models must not be fenced")
+	}
+}

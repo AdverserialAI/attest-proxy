@@ -167,9 +167,24 @@ func (s *Server) Handler() http.Handler {
 		api = s.requireEHBP(s.ehbp.Middleware()(api))
 		mux.HandleFunc(ehbpprotocol.KeysPath, s.ehbp.ConfigHandler)
 	}
-	mux.Handle("/", api)
+	// Fence the model API surface: only /v1/ reaches the upstream. SGLang's
+	// native /generate, /vertex_generate, /invocations, memory-management, and
+	// config endpoints must never be reachable through the public edge.
+	mux.Handle("/", fencedAPI(api))
 
 	return proxy.Logging(s.logger, s.cors(s.hostRouter(mux)))
+}
+
+// fencedAPI forwards only the /v1/ model API to the upstream and refuses
+// every other path, so an upstream feature endpoint fails closed by default.
+func fencedAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // startMeterRetry drains durable count-only records after boot and every 30
