@@ -94,9 +94,9 @@ func newStartGate(t *testing.T, meterURL string) (*Gate, ed25519.PrivateKey, tim
 	g := &Gate{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Confidential: true, ConfidentialActive: true,
 		Entitlements: &entitlement.Validator{Keys: map[string]ed25519.PublicKey{"billing": pub}, Issuer: "https://billing.adverserial.ai", Audience: "https://api.adverserial.ai", Now: func() time.Time { return now }},
-		Replay:     &entitlement.UsedStore{Dir: t.TempDir()},
-		ActiveSPKI: func() string { return startTestSPKI },
-		Billing:    &billing.Client{MeterURL: meterURL, MeterIngressSecret: "test-ingress-capability"},
+		Replay:       &entitlement.UsedStore{Dir: t.TempDir()},
+		ActiveSPKI:   func() string { return startTestSPKI },
+		Billing:      &billing.Client{MeterURL: meterURL, MeterIngressSecret: "test-ingress-capability"},
 		Meter: &MeterConfig{Signer: signer, Issuer: "https://api.adverserial.ai", Audience: "https://billing.adverserial.ai",
 			Outbox: meter.Outbox{Dir: t.TempDir()}},
 	}
@@ -263,5 +263,30 @@ func TestStartGateFailsClosed(t *testing.T) {
 	}
 	if up.hits.Load() != 0 {
 		t.Error("upstream was hit when billing was unreachable")
+	}
+}
+
+// TestConfidentialOversizedBodyRejected: an over-limit body must never
+// bypass entitlement validation via the unattributed passthrough — in
+// confidential mode it is a hard 413 before any upstream or billing work.
+func TestConfidentialOversizedBodyRejected(t *testing.T) {
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	up := &countingHandler{t: t}
+	h := g.Middleware(up.handler())
+
+	body := `{"model":"lordx64/cyberglm","max_tokens":32,"messages":[{"role":"user","content":"` + strings.Repeat("x", maxModelParseBody) + `"}]}`
+	token := signedEntitlement(t, private, "billing", testEntitlementClaims("reservation-oversized", now))
+	rec := postChat(t, h, token, body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%.200s", rec.Code, rec.Body)
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("upstream hits = %d, want 0", up.hits.Load())
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatalf("start calls = %d, want 0", stub.calls.Load())
 	}
 }

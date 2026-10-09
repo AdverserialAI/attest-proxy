@@ -148,7 +148,10 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		if over {
-			if g.Enforce {
+			if g.Enforce || g.Confidential {
+				// Confidential requests must never proxy without attribution:
+				// billing caps entitlement input at 6MB, far under this limit,
+				// so no legitimate request is rejected here.
 				writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 				return
 			}
