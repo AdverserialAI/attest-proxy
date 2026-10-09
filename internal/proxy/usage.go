@@ -93,18 +93,23 @@ func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 		return nil // no attribution available (e.g. oversized body)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil // upstream/application error → no usage event, no receipt
+		// Upstream rejected or failed after dispatch: settle with zero counts
+		// so billing can release the reservation. No usage event, no receipt.
+		meter.SettlementFrom(req.Context()).Settle()
+		return nil
 	}
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	switch {
 	case strings.HasPrefix(ct, "text/event-stream"):
-		resp.Body = newSSETap(resp.Body, t, info)
+		resp.Body = newSSETap(resp.Body, t, info, meter.SettlementFrom(req.Context()))
 	case ct == "" || strings.Contains(ct, "application/json"):
+		settle := meter.SettlementFrom(req.Context())
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
 		_ = resp.Body.Close()
 		if err != nil || len(body) > maxUsageBody {
 			restoreBody(resp, body)
+			settle.Settle() // unparsable response: best-known counts are zeros
 			return nil
 		}
 		restoreBody(resp, body)
@@ -115,7 +120,14 @@ func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 			usagePtr = &u
 		}
 		if usagePtr != nil {
-			t.fire(info, *usagePtr)
+			if settle != nil {
+				settle.Observe(usagePtr.Input, usagePtr.Cached, usagePtr.Output)
+				settle.Settle()
+			} else {
+				t.fire(info, *usagePtr)
+			}
+		} else {
+			settle.Settle() // 200 without a usage object: settle zeros
 		}
 		if t.Receipts != nil {
 			sum := sha256.Sum256(body)
@@ -126,6 +138,10 @@ func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 				t.Logger.Warn("receipt minting failed", "error", err.Error())
 			}
 		}
+	default:
+		// Unexpected 200 content type: the body forwards untouched; settle
+		// with zero counts (best-known) so the reservation cannot leak.
+		meter.SettlementFrom(req.Context()).Settle()
 	}
 	return nil
 }
@@ -161,7 +177,10 @@ func (t *UsageTap) mintReceipt(info *gate.RequestInfo, responseHash string, usag
 	return cfg.Signer.Mint(claims)
 }
 
-// fire posts the usage event in the background with a short timeout.
+// fire posts the usage event in the background with a short timeout. It
+// serves the legacy Sink path and the confidential fallback when the request
+// carries no terminal settlement handle (the gate always attaches one in
+// confidential mode, so the settlement path is authoritative there).
 func (t *UsageTap) fire(info *gate.RequestInfo, u usageCounts) {
 	if t.Meter != nil && info.ReservationID != "" {
 		token, claims, err := meter.Build(t.Meter.Signer, info.ReservationID, info.RequestID,
@@ -283,9 +302,10 @@ func extractUsageJSON(body []byte) (usageCounts, bool) {
 // chunk followed by the held [DONE] — upstream events are never dropped or
 // reordered, and without a ReceiptConfig the byte stream is untouched.
 type sseTapReader struct {
-	rc   io.ReadCloser
-	tap  *UsageTap
-	info *gate.RequestInfo
+	rc     io.ReadCloser
+	tap    *UsageTap
+	info   *gate.RequestInfo
+	settle *meter.TerminalSettlement // nil outside confidential mode
 
 	buf     [32 * 1024]byte
 	in      []byte // bytes not yet split into complete lines
@@ -302,8 +322,8 @@ type sseTapReader struct {
 	fired  bool
 }
 
-func newSSETap(rc io.ReadCloser, tap *UsageTap, info *gate.RequestInfo) *sseTapReader {
-	return &sseTapReader{rc: rc, tap: tap, info: info, hasher: sha256.New()}
+func newSSETap(rc io.ReadCloser, tap *UsageTap, info *gate.RequestInfo, settle *meter.TerminalSettlement) *sseTapReader {
+	return &sseTapReader{rc: rc, tap: tap, info: info, settle: settle, hasher: sha256.New()}
 }
 
 func (r *sseTapReader) Read(p []byte) (int, error) {
@@ -344,9 +364,12 @@ func (r *sseTapReader) Read(p []byte) (int, error) {
 func (r *sseTapReader) Close() error {
 	if !r.eof {
 		// Aborted stream (client disconnect): no receipt — it would cover a
-		// partial stream. Still report captured usage.
+		// partial stream. Still report captured usage to the legacy sink.
 		r.fireUsage()
 	}
+	// Client abort, or the post-EOF close of a completed stream: settle
+	// exactly once with the observed counts (zeros when none arrived).
+	r.settle.Settle()
 	return r.rc.Close()
 }
 
@@ -395,6 +418,7 @@ func (r *sseTapReader) scanLine(line []byte) {
 	if u, ok := extractUsageJSON(payload); ok {
 		u := u
 		r.usage = &u
+		r.settle.Observe(u.Input, u.Cached, u.Output)
 	}
 }
 
@@ -425,6 +449,9 @@ func (r *sseTapReader) finalize() {
 		r.dispatchEvent()
 	}
 	r.fireUsage()
+	// Terminal settle at upstream EOF: a completed stream carries the real
+	// observed counts, a usage-less stream settles zeros. Exactly once.
+	r.settle.Settle()
 	if r.tap.Receipts != nil && r.err == nil {
 		if jws, err := r.tap.mintReceipt(r.info, "sha256:"+base64.RawURLEncoding.EncodeToString(r.hasher.Sum(nil)), r.usage); err == nil {
 			chunk, _ := json.Marshal(map[string]string{"adverserial_receipt": jws})
@@ -440,8 +467,13 @@ func (r *sseTapReader) finalize() {
 }
 
 func (r *sseTapReader) fireUsage() {
-	if !r.fired && r.usage != nil {
-		r.fired = true
+	if r.fired || r.usage == nil {
+		return
+	}
+	r.fired = true
+	// With a settlement handle the meter event is Settle's job (exactly once,
+	// carrying the observed counts); fire serves only the legacy sink path.
+	if r.settle == nil {
 		r.tap.fire(r.info, *r.usage)
 	}
 }

@@ -164,3 +164,85 @@ func TestConfidentialMeterUsesDedicatedIngressURL(t *testing.T) {
 		t.Errorf("dedicated ingress path = %q", gotPath)
 	}
 }
+
+// TestPostStartContract pins the /cc/start request shape: dedicated ingress
+// URL, {"start": "<JWS>"} body, dedicated capability header, and never the
+// legacy bearer.
+func TestPostStartContract(t *testing.T) {
+	var got map[string]string
+	var gotPath, gotIngress, gotAuth string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotIngress = r.Header.Get("X-Adverserial-Meter-Ingress")
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"stored":true,"started":false}`))
+	}))
+	defer stub.Close()
+
+	c := &Client{BaseURL: "http://billing.invalid", MeterURL: stub.URL, MeterIngressSecret: "direct-only-capability", WriterSecret: "not-used"}
+	res, err := c.PostStart(context.Background(), "header.payload.signature")
+	if err != nil {
+		t.Fatalf("PostStart: %v", err)
+	}
+	if gotPath != "/cc/start" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if got["start"] != "header.payload.signature" || len(got) != 1 {
+		t.Errorf("body = %v", got)
+	}
+	if gotIngress != "direct-only-capability" {
+		t.Errorf("ingress capability = %q", gotIngress)
+	}
+	if gotAuth != "" {
+		t.Errorf("start must not use shared bearer auth, got %q", gotAuth)
+	}
+	if !res.Stored || res.Started {
+		t.Errorf("result = %+v, want stored and not started", res)
+	}
+}
+
+// TestPostStartDecodesIgnoredReservation: billing answers 200 with
+// stored:false when the reservation was released or expired; that is a
+// verdict, not an error.
+func TestPostStartDecodesIgnoredReservation(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"stored":false,"ignored":"unknown_reservation","ok":true}`))
+	}))
+	defer stub.Close()
+	res, err := (&Client{MeterURL: stub.URL}).PostStart(context.Background(), "header.payload.signature")
+	if err != nil {
+		t.Fatalf("PostStart: %v", err)
+	}
+	if res.Stored || res.Ignored != "unknown_reservation" {
+		t.Errorf("result = %+v", res)
+	}
+}
+
+// TestPostStartFailClosed: non-2xx, malformed 200 bodies, and unreachable
+// billing are all errors; the gate refuses dispatch on any of them.
+func TestPostStartFailClosed(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer stub.Close()
+	if _, err := (&Client{MeterURL: stub.URL}).PostStart(context.Background(), "t"); err == nil {
+		t.Error("4xx must be an error")
+	}
+
+	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer malformed.Close()
+	if _, err := (&Client{MeterURL: malformed.URL}).PostStart(context.Background(), "t"); err == nil {
+		t.Error("malformed 200 body must be an error")
+	}
+
+	if _, err := (&Client{MeterURL: "http://127.0.0.1:1"}).PostStart(context.Background(), "t"); err == nil {
+		t.Error("unreachable must be an error")
+	}
+}

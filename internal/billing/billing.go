@@ -140,6 +140,54 @@ func (c *Client) PostMeter(ctx context.Context, token string) error {
 	return nil
 }
 
+// StartResult is the /cc/start response. Stored=false means billing no
+// longer holds the reservation (released or expired); Started=true means the
+// reservation was already dispatched once.
+type StartResult struct {
+	Stored  bool   `json:"stored"`
+	Started bool   `json:"started"`
+	Ignored string `json:"ignored"`
+}
+
+// PostStart registers the start of a reservation's dispatch with billing
+// before any inference runs. It uses the same meter ingress (or direct-signed
+// route) and Ed25519 JWS authentication as PostMeter, and is the fail-closed
+// dispatch precondition: callers must treat any error as fatal to the
+// request. Any 2xx response decodes into a StartResult; non-2xx and transport
+// failures are errors.
+func (c *Client) PostStart(ctx context.Context, token string) (StartResult, error) {
+	body, err := json.Marshal(map[string]string{"start": token})
+	if err != nil {
+		return StartResult{}, err
+	}
+	baseURL := c.MeterURL
+	if baseURL == "" {
+		baseURL = c.BaseURL // retained only for non-confidential backwards compatibility
+	}
+	url := strings.TrimRight(baseURL, "/") + "/cc/start"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return StartResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.MeterIngressSecret != "" {
+		req.Header.Set("X-Adverserial-Meter-Ingress", c.MeterIngressSecret)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return StartResult{}, fmt.Errorf("billing confidential start write: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return StartResult{}, fmt.Errorf("billing confidential start write status %d", resp.StatusCode)
+	}
+	var res StartResult
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&res); err != nil {
+		return StartResult{}, fmt.Errorf("billing confidential start decode: %w", err)
+	}
+	return res, nil
+}
+
 func (c *Client) post(ctx context.Context, path string, body []byte) (*http.Response, error) {
 	url := strings.TrimRight(c.BaseURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

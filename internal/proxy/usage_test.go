@@ -141,7 +141,8 @@ func TestSSEUsageTapByteIdentical(t *testing.T) {
 	sink.expectNone(t, 150*time.Millisecond)
 }
 
-// TestSSEStreamWithoutUsage: no usage chunk → no billing write.
+// TestSSEStreamWithoutUsage: a completed stream with no usage chunk still
+// settles the reservation — with zero counts (and no legacy usage event).
 func TestSSEStreamWithoutUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -149,15 +150,17 @@ func TestSSEStreamWithoutUsage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	dir := t.TempDir()
+	settle := newTestSettlement(t, dir)
 	sink := newRecordSink()
-	front := tapChain(t, upstream, sink)
+	front := settlementChain(t, upstream, settle, sink)
 	resp, err := http.Post(front.URL+"/v1/chat/completions", "application/json", strings.NewReader(chatReq))
 	if err != nil {
 		t.Fatal(err)
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	time.Sleep(100 * time.Millisecond) // let any fire happen
+	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
 	sink.expectNone(t, 200*time.Millisecond)
 }
 
@@ -214,26 +217,33 @@ func TestResponsesShapeUsage(t *testing.T) {
 	}
 }
 
-// TestNoUsageEventOnUpstreamError: error responses produce no usage write.
-func TestNoUsageEventOnUpstreamError(t *testing.T) {
+// TestZeroSettlementOnUpstreamError: an upstream error status after dispatch
+// still settles the reservation — with zero counts — while the legacy usage
+// tap stays silent and the client sees the upstream status unchanged.
+func TestZeroSettlementOnUpstreamError(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusInternalServerError} {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			_, _ = io.WriteString(w, `{"error":{"message":"boom","usage":{"prompt_tokens":1}}}`)
 		}))
+		dir := t.TempDir()
+		settle := newTestSettlement(t, dir)
 		sink := newRecordSink()
-		front := tapChain(t, upstream, sink)
+		front := settlementChain(t, upstream, settle, sink)
 		resp, err := http.Post(front.URL+"/v1/chat/completions", "application/json", strings.NewReader(chatReq))
 		if err != nil {
 			t.Fatal(err)
 		}
 		io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if resp.StatusCode != status {
+			t.Errorf("status = %d, want upstream %d", resp.StatusCode, status)
+		}
+		assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
+		sink.expectNone(t, 150*time.Millisecond)
 		front.Close()
 		upstream.Close()
-		time.Sleep(100 * time.Millisecond)
-		sink.expectNone(t, 150*time.Millisecond)
 	}
 }
 

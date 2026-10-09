@@ -3,7 +3,6 @@ package gate
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/adverserial/attest-proxy/internal/billing"
-	"github.com/adverserial/attest-proxy/internal/entitlement"
 )
 
 // billingStub serves /auth/check with a programmable verdict and counts calls.
@@ -97,18 +95,11 @@ func signedEntitlement(t *testing.T, private ed25519.PrivateKey, kid string, cla
 }
 
 func TestConfidentialGateUsesEntitlementOnce(t *testing.T) {
-	pub, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(1_760_000_000, 0)
-	spki := "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	claims := map[string]any{"iss": "https://billing.adverserial.ai", "aud": "https://api.adverserial.ai", "typ": "adverserial-confidential-entitlement/v1", "jti": "reservation-1", "model": "lordx64/cyberglm", "max_input_tokens": 4096, "max_output_tokens": 32, "max_requests": 1, "cnf": map[string]string{"tls_spki_sha256": spki}, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix()}
-	g := &Gate{
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Confidential: true, ConfidentialActive: true,
-		Entitlements: &entitlement.Validator{Keys: map[string]ed25519.PublicKey{"billing": pub}, Issuer: "https://billing.adverserial.ai", Audience: "https://api.adverserial.ai", Now: func() time.Time { return now }},
-		Replay:       &entitlement.UsedStore{Dir: t.TempDir()}, ActiveSPKI: func() string { return spki },
-	}
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	claims := testEntitlementClaims("reservation-1", now)
 	token := signedEntitlement(t, private, "billing", claims)
 	body := `{"model":"lordx64/cyberglm","max_tokens":32,"messages":[{"role":"user","content":"never log this marker"}]}`
 	h := g.Middleware(okHandler(t))
@@ -135,6 +126,11 @@ func TestConfidentialGateUsesEntitlementOnce(t *testing.T) {
 	over := postChat(t, h, token, strings.Replace(body, "\"max_tokens\":32", "\"max_tokens\":33", 1))
 	if over.Code != http.StatusUnauthorized {
 		t.Fatalf("over-limit status=%d", over.Code)
+	}
+	// Only the first, fully validated request registered a dispatch start:
+	// replay and validation failures refuse before billing is contacted.
+	if got := stub.calls.Load(); got != 1 {
+		t.Errorf("start calls = %d, want 1", got)
 	}
 }
 

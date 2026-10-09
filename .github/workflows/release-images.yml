@@ -24,6 +24,8 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: ghcr.io/adverserialai/attest-proxy:${{ github.ref_name }}
           provenance: mode=max
           sbom: true

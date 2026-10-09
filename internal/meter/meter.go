@@ -167,3 +167,13 @@ func Build(s *Signer, reservation, requestID, model, issuer, audience string, in
 	token, err := s.Sign(c)
 	return token, c, err
 }
+
+// BuildStart returns a signed ten-minute start event announcing that dispatch
+// of a reservation is beginning. Billing records it before any inference runs
+// so a released reservation can never complete unbilled; the counts stay zero
+// because settlement always arrives as a separate meter event.
+func BuildStart(s *Signer, reservation, requestID, model, issuer, audience string, now time.Time) (string, Claims, error) {
+	c := Claims{Issuer: issuer, Audience: audience, Type: "adverserial-confidential-start/v1", Reservation: reservation, RequestID: requestID, Model: model, IssuedAt: now.Unix(), Expires: now.Add(10 * time.Minute).Unix()}
+	token, err := s.Sign(c)
+	return token, c, err
+}

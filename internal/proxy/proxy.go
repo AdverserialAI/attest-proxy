@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/adverserial/attest-proxy/internal/meter"
 )
 
 // New builds a streaming-safe reverse proxy to the upstream inference server.
@@ -97,6 +99,10 @@ func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *Usag
 	}
 
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// Dial errors, response-header timeouts, and cancels before headers
+		// land here — after dispatch began — so the reservation owes a
+		// terminal settlement (zero counts; nothing was observable).
+		meter.SettlementFrom(r.Context()).Settle()
 		logger.Warn("upstream error",
 			"method", r.Method,
 			"path", PathClass(r.URL.Path),
@@ -106,6 +112,31 @@ func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *Usag
 	}
 
 	return rp
+}
+
+// SettleRecovery returns middleware that recovers panics from the
+// confidential API handler chain. A panic after dispatch would otherwise leak
+// the billing reservation, so it settles the request's terminal settlement
+// (observed counts when a usage chunk already passed, zeros otherwise) and
+// then answers 500 instead of re-panicking: net/http's own recovery would
+// just kill the connection, and a JSON 500 is strictly friendlier to clients
+// while equally safe. Without a settlement in the request context (every
+// non-confidential request) only the 500 behavior changes.
+func SettleRecovery(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				meter.SettlementFrom(r.Context()).Settle()
+				logger.Error("recovered from handler panic",
+					"method", r.Method,
+					"path", PathClass(r.URL.Path),
+					"panic", fmt.Sprint(rec),
+				)
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Logging returns middleware that logs one line per request: method, path

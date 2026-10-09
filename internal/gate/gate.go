@@ -2,8 +2,11 @@
 // request-info extraction (model, key prefix, request id) used by both the
 // gate and the usage tap.
 //
-// Fail-closed rules: billing unreachable or non-200 → 503, no inference.
-// The client API key is never logged; denials log the 8-char prefix only.
+// Fail-closed rules: billing unreachable or non-200 → 503, no inference. In
+// confidential mode the same rule covers the /cc/start dispatch precondition:
+// a reservation whose start billing cannot durably record is never
+// dispatched. The client API key is never logged; denials log the 8-char
+// prefix only.
 package gate
 
 import (
@@ -25,6 +28,7 @@ import (
 	"github.com/adverserial/attest-proxy/internal/attestation"
 	"github.com/adverserial/attest-proxy/internal/billing"
 	"github.com/adverserial/attest-proxy/internal/entitlement"
+	"github.com/adverserial/attest-proxy/internal/meter"
 )
 
 // maxModelParseBody caps how much of a request body the gate buffers to
@@ -53,6 +57,17 @@ func RequestInfoFrom(ctx context.Context) *RequestInfo {
 	return info
 }
 
+// MeterConfig carries the METER_* configuration the gate needs for the
+// reservation lifecycle: signing /cc/start events and building per-request
+// terminal settlements. The outbox is the same durable outbox the usage tap
+// flushes.
+type MeterConfig struct {
+	Signer   *meter.Signer
+	Issuer   string
+	Audience string
+	Outbox   meter.Outbox
+}
+
 // Gate is the auth middleware. Enforce=false disables the billing check (the
 // middleware still extracts RequestInfo for usage attribution).
 type Gate struct {
@@ -71,6 +86,12 @@ type Gate struct {
 	Entitlements       *entitlement.Validator
 	Replay             *entitlement.UsedStore
 	ActiveSPKI         func() string
+
+	// Meter wires the confidential reservation lifecycle into the gate: the
+	// fail-closed /cc/start dispatch precondition and the per-request terminal
+	// settlement handle stashed in the request context. Required when
+	// Confidential is true; ignored otherwise.
+	Meter *MeterConfig
 
 	TTL time.Duration // verdict cache lifetime, default 60s
 
@@ -98,7 +119,7 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if g.Confidential && (g.Entitlements == nil || g.Replay == nil || g.ActiveSPKI == nil) {
+		if g.Confidential && (g.Entitlements == nil || g.Replay == nil || g.ActiveSPKI == nil || g.Meter == nil || g.Billing == nil) {
 			writeError(w, http.StatusServiceUnavailable, "confidential authorization not configured")
 			return
 		}
@@ -160,6 +181,10 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			nonce = newNonce()
 		}
 		bodySum := sha256.Sum256(body)
+		// The client's exact body length is the entitlement input bound and the
+		// receipt binds the client's exact bytes; both are captured before the
+		// upstream-bound body is rewritten below.
+		clientBodyLen := len(body)
 
 		info := &RequestInfo{
 			Model:           parsed.Model,
@@ -170,6 +195,16 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, info))
 
+		// Streaming chat completions always carry stream_options.include_usage
+		// upstream so a completed stream ends in a usage chunk and terminal
+		// settlement reports real counts. The client's original body hash and
+		// input bound above are unaffected.
+		if upstreamBody, ok := injectIncludeUsage(r.URL.Path, body); ok {
+			body = upstreamBody
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		}
+
 		if g.Confidential {
 			// A byte-level tokenizer cannot emit more tokens than UTF-8 bytes;
 			// using the exact raw JSON body is therefore a conservative local
@@ -178,7 +213,7 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 				writeError(w, http.StatusBadRequest, "confidential requests require a positive max_tokens")
 				return
 			}
-			claims, err := g.Entitlements.Validate(key, parsed.Model, g.ActiveSPKI(), len(body), *parsed.MaxTokens)
+			claims, err := g.Entitlements.Validate(key, parsed.Model, g.ActiveSPKI(), clientBodyLen, *parsed.MaxTokens)
 			if err != nil {
 				g.Logger.Info("confidential entitlement denied", "model", parsed.Model, "reason", err.Error())
 				writeError(w, http.StatusUnauthorized, "invalid, expired, replayed, or mismatched confidential entitlement")
@@ -196,6 +231,15 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			}
 			info.ReservationID = claims.ID
 			info.KeyPrefix = "" // an entitlement is not a platform API key
+			if status, msg := g.registerDispatch(r.Context(), info); status != 0 {
+				writeError(w, status, msg)
+				return
+			}
+			// From here on the reservation owes settlement on every terminal
+			// path; the handle travels with the request context.
+			settle := meter.NewTerminalSettlement(g.Meter.Signer, g.Meter.Issuer, g.Meter.Audience,
+				g.Meter.Outbox, claims.ID, info.RequestID, info.Model, g.Logger)
+			r = r.WithContext(meter.WithSettlement(r.Context(), settle))
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -226,6 +270,43 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// registerDispatch implements the fail-closed dispatch precondition: billing
+// must durably record that this reservation's inference is starting before
+// any upstream work runs. The start POST is synchronous and deliberately not
+// routed through the durable outbox — when start cannot reach billing the
+// request is simply never dispatched, so no settlement is ever owed. It
+// returns (0, "") to proceed, or the HTTP status and client message to
+// refuse with.
+func (g *Gate) registerDispatch(ctx context.Context, info *RequestInfo) (int, string) {
+	token, _, err := meter.BuildStart(g.Meter.Signer, info.ReservationID, info.RequestID,
+		info.Model, g.Meter.Issuer, g.Meter.Audience, time.Now().UTC())
+	if err != nil {
+		g.Logger.Error("confidential start signing failed", "request_id", info.RequestID, "error", err.Error())
+		return http.StatusServiceUnavailable, "confidential dispatch registration unavailable"
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := g.Billing.PostStart(callCtx, token)
+	if err != nil {
+		// Fail closed: network error, timeout, or any non-2xx → no inference.
+		g.Logger.Warn("confidential start registration failed", "request_id", info.RequestID, "error", err.Error())
+		return http.StatusServiceUnavailable, "confidential dispatch registration unavailable"
+	}
+	if !res.Stored {
+		// Billing released or expired the reservation after minting the
+		// entitlement; dispatching now would run unbillable inference.
+		g.Logger.Info("confidential reservation no longer held by billing",
+			"request_id", info.RequestID, "reason", orDefault(res.Ignored, "not stored"))
+		return http.StatusUnauthorized, "confidential reservation was released or expired"
+	}
+	if res.Started {
+		// This reservation already dispatched once; never dispatch twice.
+		g.Logger.Info("confidential reservation already dispatched", "request_id", info.RequestID)
+		return http.StatusConflict, "confidential reservation was already dispatched"
+	}
+	return 0, ""
 }
 
 // check returns a cached verdict when fresh, otherwise calls billing. Billing

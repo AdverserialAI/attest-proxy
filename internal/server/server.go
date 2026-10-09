@@ -150,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 		g.ActiveSPKI = func() string { return attestation.SPKIHash(s.holder.Leaf()) }
 		outbox := meter.Outbox{Dir: s.cfg.MeterOutboxDir, Poster: billingClient}
 		s.meterOutbox = &outbox
+		g.Meter = &gate.MeterConfig{Signer: meterSigner, Issuer: s.cfg.MeterIssuer, Audience: s.cfg.MeterAudience, Outbox: outbox}
 		tap.Sink = nil // confidential mode never sends the legacy usage schema
 		tap.Meter = &proxy.ConfidentialMeterConfig{Signer: meterSigner, Issuer: s.cfg.MeterIssuer, Audience: s.cfg.MeterAudience, Outbox: outbox}
 		s.startMeterRetry()
@@ -160,6 +161,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/.well-known/adverserial-attestation", s.handleAttestation)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	api := g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap, s.cfg.UpstreamBearer))
+	if s.cfg.ConfidentialMode {
+		// A panic after dispatch must still settle the reservation (zeros)
+		// instead of leaking it; recovery answers 500.
+		api = proxy.SettleRecovery(s.logger, api)
+	}
 	if s.cfg.EHBPRequired {
 		if s.ehbp == nil {
 			panic("EHBP_REQUIRED without receiver key")

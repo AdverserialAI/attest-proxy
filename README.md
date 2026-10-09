@@ -306,13 +306,33 @@ the TLS SPKI fingerprint observed during client verification.
 The CVM verifies that JWS locally using `ENTITLEMENT_JWKS_JSON`. It checks the
 issuer, audience, expiry, canonical model, exact active TLS SPKI, body-byte
 upper bound, and requested `max_tokens`; it then atomically records the
-opaque reservation ID in `ENTITLEMENT_REPLAY_DIR` before calling SGLang.
-Consequently billing is not contacted on the prompt path and a captured
-entitlement cannot be replayed. A crash after consumption is safe: the client
-must obtain a fresh entitlement rather than risk a second inference.
+opaque reservation ID in `ENTITLEMENT_REPLAY_DIR` before calling SGLang, so a
+captured entitlement cannot be replayed. A crash after consumption is safe:
+the client must obtain a fresh entitlement rather than risk a second
+inference.
 
-After the response, the proxy signs a count-only JWS and first writes it to
-`METER_OUTBOX_DIR` with `O_EXCL`, `fsync`, and mode `0600`. It posts
+Before dispatch the proxy registers the reservation with billing: a signed
+ten-minute `adverserial-confidential-start/v1` JWS (reservation ID, request
+ID, model, timestamps — zero counts) is posted synchronously as
+`{"start":"<JWS>"}` to `POST {METER_URL}/cc/start` over the same meter
+channel. Dispatch proceeds only on `stored:true, started:false`; an
+already-started reservation is refused 409, a released or expired one 401
+(closing the release-then-replay free-inference hole), and any transport or
+non-2xx failure fails closed with 503 — no inference ever runs that billing
+could not record. The start call is deliberately not routed through the
+outbox: if it cannot reach billing, nothing is dispatched and no settlement
+is ever owed.
+
+Terminal settlement is exactly once on every path. The gate attaches a
+per-request settlement handle, and whichever terminal event happens first —
+response completion with a usage chunk, an upstream error status, a transport
+failure, a client abort mid-stream, or a handler panic (recovered to a 500) —
+enqueues one count-only meter event with the best-known counts (zeros when no
+usage was observed), so reservations settle instead of leaking. Streaming
+chat-completion requests carry `stream_options.include_usage=true` upstream
+so completed streams always end in a usage chunk; the receipt still binds the
+client's original request bytes. The proxy signs that JWS and first writes it
+to `METER_OUTBOX_DIR` with `O_EXCL`, `fsync`, and mode `0600`. It posts
 `{"meter":"<JWS>"}` only to `POST {METER_URL}/cc/meter`, using TLS 1.3 and the
 dedicated CVM client certificate. The separately deployed
 [`confidential-meter-ingress`](https://github.com/AdverserialAI/confidential-meter-ingress)
