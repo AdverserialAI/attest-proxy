@@ -303,3 +303,86 @@ func TestUsageWriteFailureDoesNotFailRequest(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond) // let the failing write run
 }
+
+// rc.20 (V4): a /v1/responses SSE stream nests usage under
+// response.completed's "response" object — the tap must extract it or the
+// stream settles zero tokens (free inference).
+func TestResponsesStreamNestedUsageSettlesRealCounts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":4}}}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	settle := newTestSettlement(t, dir)
+	sink := newRecordSink()
+	front := settlementChain(t, upstream, settle, sink)
+	resp, err := http.Post(front.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"lordx64/cyberglm","input":"hi","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assertSettlement(t, settlementClaims(t, dir), 12, 4, 7)
+}
+
+// rc.20 (V7): upstream error bodies can carry Python tracebacks and internal
+// filesystem paths; the client must get a sanitized JSON error with the
+// original status, and the reservation still settles zeros.
+func TestUpstreamErrorBodyIsScrubbed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"object":"error","message":"1 validation error:\n  {'type': 'missing', 'loc': ('body', 'file')}\n\n  File \"/sgl-workspace/sglang/python/sglang/srt/entrypoints/http_server.py\", line 42, in something\n    Traceback (most recent call last):"}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	settle := newTestSettlement(t, dir)
+	sink := newRecordSink()
+	front := settlementChain(t, upstream, settle, sink)
+	resp, err := http.Post(front.URL+"/v1/chat/completions", "application/json", strings.NewReader(chatReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want upstream 400", resp.StatusCode)
+	}
+	for _, leak := range []string{`/sgl-workspace`, `File "`, "Traceback"} {
+		if strings.Contains(string(body), leak) {
+			t.Errorf("scrubbed body still leaks %q: %s", leak, body)
+		}
+	}
+	if !strings.Contains(string(body), "validation error") {
+		t.Errorf("scrubbed body lost the useful message head: %s", body)
+	}
+	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
+}
+
+// rc.20 defense in depth: even if a request is dispatched on a path outside
+// the tap allowlist (the fence should prevent this), the reservation still
+// settles instead of dangling.
+func TestUntappedPathStillSettles(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"text_completion","usage":{"prompt_tokens":4,"completion_tokens":9}}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	settle := newTestSettlement(t, dir)
+	sink := newRecordSink()
+	front := settlementChain(t, upstream, settle, sink)
+	resp, err := http.Post(front.URL+"/v1/completions", "application/json",
+		strings.NewReader(`{"model":"lordx64/cyberglm","prompt":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
+	sink.expectNone(t, 150*time.Millisecond)
+}

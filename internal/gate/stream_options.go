@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 // injectIncludeUsage merges "stream_options": {"include_usage": true} into a
@@ -15,6 +16,30 @@ import (
 // Callers must invoke this only after capturing whatever binds the client's
 // original bytes (the receipt request-body hash and the entitlement input
 // bound): the rewritten body is upstream-bound only.
+// jsonStreamTruthy reports whether a JSON value asks for streaming. The
+// upstream (pydantic) coerces more than the JSON boolean: 1, "1", "true",
+// "yes", "on" all stream — injection must cover exactly what upstream honors,
+// otherwise a non-boolean truthy flag streams unmetered.
+func jsonStreamTruthy(raw json.RawMessage) bool {
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return b
+	}
+	var n float64
+	if json.Unmarshal(raw, &n) == nil {
+		return n != 0
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "", "0", "false", "no", "off":
+			return false
+		}
+		return true
+	}
+	return false // null, arrays, objects
+}
+
 func injectIncludeUsage(path string, body []byte) ([]byte, bool) {
 	if path != "/v1/chat/completions" {
 		return nil, false
@@ -23,8 +48,8 @@ func injectIncludeUsage(path string, body []byte) ([]byte, bool) {
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, false
 	}
-	var stream bool
-	if raw, ok := doc["stream"]; !ok || json.Unmarshal(raw, &stream) != nil || !stream {
+	raw, ok := doc["stream"]
+	if !ok || !jsonStreamTruthy(raw) {
 		return nil, false
 	}
 	opts := map[string]json.RawMessage{}

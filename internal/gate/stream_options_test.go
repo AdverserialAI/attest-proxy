@@ -141,3 +141,35 @@ func TestGateInjectsIncludeUsageAfterBinding(t *testing.T) {
 		t.Errorf("/v1/responses body modified: %s", gotBody)
 	}
 }
+
+// rc.20 (V3): the upstream coerces non-boolean truthy stream flags — the
+// injection must cover every spelling that actually streams, or the stream
+// settles zero tokens (free inference).
+func TestInjectIncludeUsageTruthyStreamVariants(t *testing.T) {
+	inject := []string{`true`, `1`, `"true"`, `"yes"`, `"on"`, `"1"`}
+	for _, v := range inject {
+		body := []byte(`{"model":"m/x","stream":` + v + `,"max_tokens":8}`)
+		out, ok := injectIncludeUsage("/v1/chat/completions", body)
+		if !ok {
+			t.Errorf("stream=%s must inject include_usage", v)
+			continue
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("rewritten body is not JSON: %v", err)
+		}
+		var opts struct {
+			IncludeUsage bool `json:"include_usage"`
+		}
+		if err := json.Unmarshal(doc["stream_options"], &opts); err != nil || !opts.IncludeUsage {
+			t.Errorf("stream=%s: include_usage missing after rewrite", v)
+		}
+	}
+	skip := []string{`false`, `0`, `null`, `"false"`, `"0"`, `"no"`, `"off"`, `""`}
+	for _, v := range skip {
+		body := []byte(`{"model":"m/x","stream":` + v + `,"max_tokens":8}`)
+		if _, ok := injectIncludeUsage("/v1/chat/completions", body); ok {
+			t.Errorf("stream=%s must not be treated as streaming", v)
+		}
+	}
+}

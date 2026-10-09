@@ -173,10 +173,16 @@ func (s *Server) Handler() http.Handler {
 		api = s.requireEHBP(s.ehbp.Middleware()(api))
 		mux.HandleFunc(ehbpprotocol.KeysPath, s.ehbp.ConfigHandler)
 	}
-	// Fence the model API surface: only /v1/ reaches the upstream. SGLang's
-	// native /generate, /vertex_generate, /invocations, memory-management, and
-	// config endpoints must never be reachable through the public edge.
-	mux.Handle("/", fencedAPI(api))
+	// Fence the model API surface: in confidential mode only the metered and
+	// receipted routes may dispatch (strict allowlist); legacy mode keeps the
+	// /v1/ prefix fence. SGLang's native /generate, /vertex_generate,
+	// /invocations, memory-management, and config endpoints must never be
+	// reachable through the public edge.
+	if s.cfg.ConfidentialMode {
+		mux.Handle("/", fencedAPIConfidential(api))
+	} else {
+		mux.Handle("/", fencedAPI(api))
+	}
 
 	return proxy.Logging(s.logger, s.cors(s.hostRouter(mux)))
 }
@@ -186,6 +192,24 @@ func (s *Server) Handler() http.Handler {
 func fencedAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// fencedAPIConfidential allowlists the public inference routes: only paths
+// that are metered and receipted may dispatch to the model in confidential
+// mode. Everything else — including upstream routes we do not bill, trailing
+// slashes, and method mismatches — 404s before the body is read, so no
+// reservation is ever started for an unsettleable request.
+func fencedAPIConfidential(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allowed := (r.Method == http.MethodGet && r.URL.Path == "/v1/models") ||
+			(r.Method == http.MethodPost &&
+				(r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses"))
+		if !allowed {
 			http.NotFound(w, r)
 			return
 		}

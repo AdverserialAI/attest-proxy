@@ -611,3 +611,53 @@ func TestFencedAPIBlocksNativeSGLangEndpoints(t *testing.T) {
 		t.Error("/v1/models must not be fenced")
 	}
 }
+
+// rc.20: in confidential mode the public edge allowlists only the metered,
+// receipted inference routes. Nothing else may reach the gate or upstream.
+func TestConfidentialFenceAllowlist(t *testing.T) {
+	reached := 0
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := fencedAPIConfidential(next)
+
+	allowed := []struct{ m, p string }{
+		{http.MethodGet, "/v1/models"},
+		{http.MethodPost, "/v1/chat/completions"},
+		{http.MethodPost, "/v1/responses"},
+	}
+	for _, tc := range allowed {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(tc.m, tc.p, nil))
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("%s %s must not be fenced", tc.m, tc.p)
+		}
+	}
+
+	denied := []struct{ m, p string }{
+		{http.MethodPost, "/v1/completions"},       // unmetered free-inference hole (R20-EHBP-001)
+		{http.MethodPost, "/v1/messages"},          // same class, Anthropic format
+		{http.MethodPost, "/v1/embeddings"},        // latent: reservation dangled on upstream error
+		{http.MethodPost, "/v1/score"},             // latent
+		{http.MethodPost, "/v1/rerank"},            // latent
+		{http.MethodPost, "/v1/tokenize"},          // unmetered tokenization + max_model_len leak
+		{http.MethodPost, "/v1/models"},            // method mismatch
+		{http.MethodGet, "/v1/chat/completions"},   // method mismatch
+		{http.MethodPost, "/v1/chat/completions/"}, // trailing slash dodges the tap allowlist
+		{http.MethodPost, "/v1/images/generations"},
+		{http.MethodPost, "/v1/audio/transcriptions"},
+		{http.MethodPost, "/generate"},
+		{http.MethodGet, "/v1/models/anything"},
+	}
+	for _, tc := range denied {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(tc.m, tc.p, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404", tc.m, tc.p, rec.Code)
+		}
+	}
+	if reached != len(allowed) {
+		t.Errorf("next reached %d times, want %d (denied paths must never dispatch)", reached, len(allowed))
+	}
+}

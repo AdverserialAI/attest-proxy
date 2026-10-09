@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,18 +86,30 @@ func tappablePath(p string) bool {
 // ModifyResponse implements httputil.ReverseProxy.ModifyResponse.
 func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 	req := resp.Request
-	if req == nil || req.Method != http.MethodPost || !tappablePath(req.URL.Path) {
+	if req == nil || req.Method != http.MethodPost || !strings.HasPrefix(req.URL.Path, "/v1/") {
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		// Any dispatched confidential request owes settlement on failure,
+		// tapped or not; and upstream error bodies never reach the client
+		// verbatim — they can carry tracebacks and internal filesystem paths.
+		settle := meter.SettlementFrom(req.Context())
+		settle.Settle()
+		if settle != nil {
+			scrubErrorBody(resp)
+		}
+		return nil
+	}
+	if !tappablePath(req.URL.Path) {
+		// Defense in depth: the confidential fence allowlists tapped paths,
+		// but a dispatched request on any other route must still settle.
+		meter.SettlementFrom(req.Context()).Settle()
 		return nil
 	}
 	info := gate.RequestInfoFrom(req.Context())
 	if info == nil || info.Model == "" {
-		return nil // no attribution available (e.g. oversized body)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// Upstream rejected or failed after dispatch: settle with zero counts
-		// so billing can release the reservation. No usage event, no receipt.
 		meter.SettlementFrom(req.Context()).Settle()
-		return nil
+		return nil // no attribution available (e.g. oversized body)
 	}
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
@@ -144,6 +157,51 @@ func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 		meter.SettlementFrom(req.Context()).Settle()
 	}
 	return nil
+}
+
+// scrubErrorBody replaces an upstream error body with a sanitized JSON error.
+// The status code is kept, but tracebacks, absolute filesystem paths, and
+// framework internals ("/sgl-workspace/...", Python file lines) never reach
+// the client. Only runs for confidential dispatched requests.
+func scrubErrorBody(resp *http.Response) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
+	_ = resp.Body.Close()
+	msg := "upstream request failed"
+	if err == nil && len(body) <= maxUsageBody {
+		var doc map[string]any
+		if json.Unmarshal(body, &doc) == nil {
+			if m, ok := doc["message"].(string); ok && m != "" {
+				msg = sanitizeUpstreamMessage(m)
+			} else if d, ok := doc["detail"].(string); ok && d != "" {
+				msg = sanitizeUpstreamMessage(d)
+			}
+		}
+	}
+	out, _ := json.Marshal(map[string]any{"error": map[string]string{"message": msg, "type": "upstream_error"}})
+	resp.Body = io.NopCloser(bytes.NewReader(out))
+	resp.ContentLength = int64(len(out))
+	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	resp.Header.Del("Content-Encoding")
+}
+
+// sanitizeUpstreamMessage keeps the human-readable head of an upstream error
+// but cuts everything from the first traceback or file reference onward.
+func sanitizeUpstreamMessage(m string) string {
+	if i := strings.Index(m, "Traceback"); i >= 0 {
+		m = m[:i]
+	}
+	if i := strings.Index(m, `File "`); i >= 0 {
+		m = m[:i]
+	}
+	m = strings.TrimSpace(m)
+	if len(m) > 300 {
+		m = m[:300]
+	}
+	if m == "" {
+		return "upstream request failed"
+	}
+	return m
 }
 
 // mintReceipt signs the WP-7 per-request receipt (hash-only claims).
@@ -263,12 +321,22 @@ type usageJSON struct {
 }
 
 // extractUsageJSON parses a JSON document or SSE data payload and returns
-// counts when it carries a non-null usage object.
+// counts when it carries a non-null usage object — top-level (`{"usage":…}`)
+// or nested under a Responses-API terminal event (`{"response":{"usage":…}}`).
 func extractUsageJSON(body []byte) (usageCounts, bool) {
 	var doc struct {
-		Usage *usageJSON `json:"usage"`
+		Usage    *usageJSON `json:"usage"`
+		Response *struct {
+			Usage *usageJSON `json:"usage"`
+		} `json:"response"`
 	}
-	if err := json.Unmarshal(body, &doc); err != nil || doc.Usage == nil {
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return usageCounts{}, false
+	}
+	if doc.Usage == nil && doc.Response != nil {
+		doc.Usage = doc.Response.Usage
+	}
+	if doc.Usage == nil {
 		return usageCounts{}, false
 	}
 	u := doc.Usage
