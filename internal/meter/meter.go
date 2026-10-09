@@ -9,12 +9,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/adverserial/attest-proxy/internal/billing"
 )
 
 type Claims struct {
@@ -151,6 +154,21 @@ func (o Outbox) Flush(ctx context.Context) error {
 			return fmt.Errorf("invalid meter outbox record %q", e.Name())
 		}
 		if err := o.Poster.PostMeter(ctx, token); err != nil {
+			var se *billing.StatusError
+			if errors.As(err, &se) && se.Status >= 400 && se.Status < 500 {
+				// Permanent rejection (a record that outlived its signing
+				// window, a malformed file, ...): quarantine it and keep
+				// flushing — one bad record must never jam the durable queue
+				// head-of-line, which is how settled reservations leak.
+				dead := filepath.Join(o.Dir, "dead", e.Name())
+				if mkErr := os.MkdirAll(filepath.Dir(dead), 0o755); mkErr != nil {
+					return mkErr
+				}
+				if mvErr := os.Rename(path, dead); mvErr != nil {
+					return mvErr
+				}
+				continue
+			}
 			return err
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -160,20 +178,23 @@ func (o Outbox) Flush(ctx context.Context) error {
 	return nil
 }
 
-// Build returns a signed ten-minute meter event suitable for the billing v1
-// confidential meter endpoint.
+// Build returns a signed one-hour meter event suitable for the billing v1
+// confidential meter endpoint. The window is deliberately long: a record must
+// outlive a CVM rebuild inside the durable outbox. Billing additionally accepts
+// authentic-but-expired records (settlement is idempotent), so the expiry is
+// hygiene, not a hard gate.
 func Build(s *Signer, reservation, requestID, model, issuer, audience string, input, cached, output int, now time.Time) (string, Claims, error) {
-	c := Claims{Issuer: issuer, Audience: audience, Type: "adverserial-confidential-meter/v1", Reservation: reservation, RequestID: requestID, Model: model, InputTokens: input, CachedTokens: cached, OutputTokens: output, IssuedAt: now.Unix(), Expires: now.Add(10 * time.Minute).Unix()}
+	c := Claims{Issuer: issuer, Audience: audience, Type: "adverserial-confidential-meter/v1", Reservation: reservation, RequestID: requestID, Model: model, InputTokens: input, CachedTokens: cached, OutputTokens: output, IssuedAt: now.Unix(), Expires: now.Add(time.Hour).Unix()}
 	token, err := s.Sign(c)
 	return token, c, err
 }
 
-// BuildStart returns a signed ten-minute start event announcing that dispatch
+// BuildStart returns a signed one-hour start event announcing that dispatch
 // of a reservation is beginning. Billing records it before any inference runs
 // so a released reservation can never complete unbilled; the counts stay zero
 // because settlement always arrives as a separate meter event.
 func BuildStart(s *Signer, reservation, requestID, model, issuer, audience string, now time.Time) (string, Claims, error) {
-	c := Claims{Issuer: issuer, Audience: audience, Type: "adverserial-confidential-start/v1", Reservation: reservation, RequestID: requestID, Model: model, IssuedAt: now.Unix(), Expires: now.Add(10 * time.Minute).Unix()}
+	c := Claims{Issuer: issuer, Audience: audience, Type: "adverserial-confidential-start/v1", Reservation: reservation, RequestID: requestID, Model: model, IssuedAt: now.Unix(), Expires: now.Add(time.Hour).Unix()}
 	token, err := s.Sign(c)
 	return token, c, err
 }

@@ -185,8 +185,8 @@ func TestStartGateProceedsFirstDispatch(t *testing.T) {
 	}
 	iat, _ := claims["iat"].(float64)
 	exp, _ := claims["exp"].(float64)
-	if exp-iat != 600 {
-		t.Errorf("start exp-iat = %v, want 600", exp-iat)
+	if exp-iat != 3600 {
+		t.Errorf("start exp-iat = %v, want 3600", exp-iat)
 	}
 	// The start event names the same request id the gate put in RequestInfo.
 	var resp struct {

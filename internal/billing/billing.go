@@ -108,6 +108,16 @@ func (c *Client) PostUsage(ctx context.Context, ev UsageEvent) error {
 	return nil
 }
 
+// StatusError is a non-2xx answer from billing. The meter outbox uses it to
+// distinguish permanent rejections (4xx — dead-letter the record and keep
+// flushing the rest of the queue) from transient failures (5xx, network —
+// abort and retry everything later).
+type StatusError struct{ Status int }
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("billing confidential write status %d", e.Status)
+}
+
 // PostMeter sends a proxy-signed, count-only confidential meter JWS through
 // either the separately deployed mTLS meter ingress or the explicitly selected
 // direct-signed billing route. Billing independently verifies the Ed25519 JWS.
@@ -135,7 +145,7 @@ func (c *Client) PostMeter(ctx context.Context, token string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("billing confidential meter write status %d", resp.StatusCode)
+		return &StatusError{Status: resp.StatusCode}
 	}
 	return nil
 }

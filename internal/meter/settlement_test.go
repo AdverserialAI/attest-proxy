@@ -45,8 +45,8 @@ func TestBuildStartRoundTrip(t *testing.T) {
 	if claims.Type != "adverserial-confidential-start/v1" {
 		t.Errorf("typ = %q", claims.Type)
 	}
-	if claims.Expires-claims.IssuedAt != 600 {
-		t.Errorf("exp-iat = %d, want 600", claims.Expires-claims.IssuedAt)
+	if claims.Expires-claims.IssuedAt != 3600 {
+		t.Errorf("exp-iat = %d, want 3600", claims.Expires-claims.IssuedAt)
 	}
 	if claims.InputTokens != 0 || claims.CachedTokens != 0 || claims.OutputTokens != 0 {
 		t.Errorf("start event must carry zero counts: %+v", claims)
