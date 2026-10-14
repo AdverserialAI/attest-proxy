@@ -41,7 +41,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*out, []byte(base64.RawURLEncoding.EncodeToString(raw)+"\n"), 0600); err != nil {
+	// O_EXCL is atomic: it refuses any existing path, including a dangling
+	// symlink, so the identity can never be steered onto an attacker-chosen
+	// file (dangling-symlink creation or swap-in overwrite).
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "refusing to overwrite existing output:", err)
+		os.Exit(2)
+	}
+	if _, err := f.WriteString(base64.RawURLEncoding.EncodeToString(raw) + "\n"); err != nil {
+		_ = f.Close()
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := f.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

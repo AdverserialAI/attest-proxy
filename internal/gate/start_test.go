@@ -290,3 +290,68 @@ func TestConfidentialOversizedBodyRejected(t *testing.T) {
 		t.Fatalf("start calls = %d, want 0", stub.calls.Load())
 	}
 }
+
+// rc.21: the readiness latch refuses admission (503) before any entitlement
+// is consumed or billing is called when the backend is not ready.
+func TestReadinessLatchRefusesBeforeEntitlementWork(t *testing.T) {
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	g.UpstreamReady = func() bool { return false }
+	up := &countingHandler{t: t}
+	h := g.Middleware(up.handler())
+
+	token := signedEntitlement(t, private, "billing", testEntitlementClaims("reservation-cold", now))
+	rec := postChat(t, h, token, startTestBody)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%.200s", rec.Code, rec.Body)
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("upstream hits = %d, want 0", up.hits.Load())
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatalf("start calls = %d, want 0 (no reservation work while cold)", stub.calls.Load())
+	}
+}
+
+func TestReadinessLatchPassesWhenReady(t *testing.T) {
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	g.UpstreamReady = func() bool { return true }
+	up := &countingHandler{t: t}
+	h := g.Middleware(up.handler())
+
+	token := signedEntitlement(t, private, "billing", testEntitlementClaims("reservation-warm", now))
+	rec := postChat(t, h, token, startTestBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%.200s", rec.Code, rec.Body)
+	}
+	if up.hits.Load() != 1 {
+		t.Fatalf("upstream hits = %d, want 1", up.hits.Load())
+	}
+}
+
+// rc.21: confidential bodies are capped at 8 MiB (billing's 6 MiB entitlement
+// bound can never validate beyond it), not the legacy 64 MiB.
+func TestConfidentialBodyCapIs8MiB(t *testing.T) {
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	g.UpstreamReady = func() bool { return true }
+	up := &countingHandler{t: t}
+	h := g.Middleware(up.handler())
+
+	body := `{"model":"lordx64/cyberglm","max_tokens":32,"messages":[{"role":"user","content":"` + strings.Repeat("x", maxConfidentialBody) + `"}]}`
+	token := signedEntitlement(t, private, "billing", testEntitlementClaims("reservation-big", now))
+	rec := postChat(t, h, token, body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413", rec.Code)
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatalf("start calls = %d, want 0", stub.calls.Load())
+	}
+}

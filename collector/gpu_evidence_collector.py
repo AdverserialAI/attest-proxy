@@ -111,25 +111,29 @@ def collect_bundle():
     if not ok:
         raise RuntimeError("NRAS attestation returned a negative verdict")
     token = client.get_token()
-    eat_jwts = [jwt for jwt in extract_jwts(token) if _is_nvidia_eat(jwt)]
+    eat_jwts = list(dict.fromkeys(jwt for jwt in extract_jwts(token) if _is_nvidia_eat(jwt)))
     if not eat_jwts:
         raise RuntimeError("NRAS attestation succeeded but yielded no EAT JWTs")
     if len(eat_jwts) < minimum_gpus:
         raise RuntimeError(f"NRAS attestation returned {len(eat_jwts)} GPU EATs; expected at least {minimum_gpus}")
 
     # The SDK generates the NRAS round nonce per Attestation instance; expose
-    # it when available, otherwise record a locally generated round id.
+    # it when available. When it is not, publish null with an explicit source
+    # marker — locally generated randomness proves nothing about the NRAS round
+    # and must never be mistaken for round binding.
     get_nonce = getattr(client, "get_nonce", None)
     if callable(get_nonce):
-        nonce = get_nonce()
-        nonce_hex = nonce.hex() if isinstance(nonce, (bytes, bytearray)) else str(nonce)
+        nonce_raw = get_nonce()
+        nonce_hex = nonce_raw.hex() if isinstance(nonce_raw, (bytes, bytearray)) else str(nonce_raw)
+        nonce_source = "nras-sdk"
     else:
-        nonce_hex = secrets.token_hex(32)
+        nonce_hex, nonce_source = None, "local-unverified"
 
     return {
         "version": 1,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "nonce": nonce_hex,
+        "nonce_source": nonce_source,
         "gpus_attested": len(eat_jwts),
         "verdict": "successful",
         "eat_jwts": eat_jwts,
@@ -150,7 +154,13 @@ def write_atomic(path, payload):
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
+        dirfd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -180,6 +190,10 @@ def main(argv=None):
         help="seconds between collection rounds in loop mode",
     )
     args = parser.parse_args(argv)
+    if args.interval < 1:
+        parser.error("--interval must be >= 1 second (0 hammers NRAS with the sealed key)")
+    if not NRAS_URL.startswith("https://"):
+        parser.error("NRAS_URL must use https — a cleartext attestation round is MITM-able")
 
     logging.basicConfig(
         level=logging.INFO,

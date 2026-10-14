@@ -72,7 +72,7 @@ func TestOutboxDeadLettersPermanentRejections(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(t.TempDir(), "outbox")
-	p := &statusPoster{status: 401}
+	p := &statusPoster{status: 400}
 	o := Outbox{Dir: dir, Poster: p}
 	for _, id := range []string{"r1", "r2", "r3"} {
 		token, claims, err := Build(s, id, "q-"+id, "lordx64/cyberglm", "issuer", "aud", 1, 0, 1, time.Unix(1, 0))
@@ -118,5 +118,34 @@ func TestOutboxRetriesTransientFailuresWithoutDeadLettering(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Fatalf("record must stay queued for retry, got %v", entries)
+	}
+}
+
+// rc.21: rate limits and auth rotation are transient — they must abort the
+// flush for a later retry, never dead-letter the episode's settlements.
+func TestOutboxRetriesAuthAndRateLimitStatuses(t *testing.T) {
+	for _, status := range []int{401, 403, 408, 413, 429} {
+		t.Run(string(rune('0'+status/100)), func(t *testing.T) {
+			s, err := NewTestSigner()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(t.TempDir(), "outbox")
+			p := &statusPoster{status: status}
+			o := Outbox{Dir: dir, Poster: p}
+			token, claims, err := Build(s, "r1", "q-r1", "lordx64/cyberglm", "issuer", "aud", 1, 0, 1, time.Unix(1, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := o.Enqueue(token, claims); err != nil {
+				t.Fatal(err)
+			}
+			if err := o.Flush(context.Background()); err == nil {
+				t.Fatalf("status %d must abort the flush for retry, not succeed", status)
+			}
+			if entries, _ := os.ReadDir(dir); len(entries) != 1 || entries[0].Name() == "dead" {
+				t.Fatalf("status %d must keep the record queued, got %v", status, entries)
+			}
+		})
 	}
 }

@@ -53,6 +53,11 @@ func NewSignerFromSeed(encoded string) (*Signer, error) {
 	nMinusOne := new(big.Int).Sub(curve.Params().N, big.NewInt(1))
 	d.Mod(d, nMinusOne)
 	d.Add(d, big.NewInt(1))
+	// Reject publicly-known keys: d==1 makes the receipt public key the P-256
+	// generator point, so anyone could forge verified receipts under this kid.
+	if d.Cmp(big.NewInt(1)) == 0 {
+		return nil, fmt.Errorf("RECEIPT_SIGNING_SEED maps to the degenerate scalar 1")
+	}
 	x, y := curve.ScalarBaseMult(d.Bytes())
 	return NewSignerFromKey(&ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y}, D: d})
 }

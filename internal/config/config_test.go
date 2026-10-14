@@ -340,6 +340,8 @@ func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
 	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	base := map[string]string{
 		"CONFIDENTIAL_MODE":      "1",
+		"EHBP_REQUIRED":          "1",
+		"EHBP_IDENTITY_B64":      "dGVzdA==",
 		"AUTH_REQUIRED":          "0",
 		"ENTITLEMENT_JWKS_JSON":  `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
 		"ENTITLEMENT_REPLAY_DIR": "/data/used-entitlements",
@@ -407,6 +409,8 @@ func TestConfidentialModeDirectSignedMetering(t *testing.T) {
 	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	env := map[string]string{
 		"CONFIDENTIAL_MODE":           "1",
+		"EHBP_REQUIRED":               "1",
+		"EHBP_IDENTITY_B64":           "dGVzdA",
 		"AUTH_REQUIRED":               "0",
 		"ENTITLEMENT_JWKS_JSON":       `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
 		"ENTITLEMENT_REPLAY_DIR":      "/data/used-entitlements",

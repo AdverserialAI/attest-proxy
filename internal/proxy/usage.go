@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"hash"
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -86,21 +88,23 @@ func tappablePath(p string) bool {
 // ModifyResponse implements httputil.ReverseProxy.ModifyResponse.
 func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 	req := resp.Request
-	if req == nil || req.Method != http.MethodPost || !strings.HasPrefix(req.URL.Path, "/v1/") {
+	if req == nil {
 		return nil
+	}
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		// Never buffer or scrub an upgraded connection; refuse the tunnel.
+		meter.SettlementFrom(req.Context()).Settle()
+		return fmt.Errorf("upstream protocol upgrade is not allowed")
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Any dispatched confidential request owes settlement on failure,
 		// tapped or not; and upstream error bodies never reach the client
 		// verbatim — they can carry tracebacks and internal filesystem paths.
-		settle := meter.SettlementFrom(req.Context())
-		settle.Settle()
-		if settle != nil {
-			scrubErrorBody(resp)
-		}
+		meter.SettlementFrom(req.Context()).Settle()
+		scrubErrorBody(resp)
 		return nil
 	}
-	if !tappablePath(req.URL.Path) {
+	if req.Method != http.MethodPost || !tappablePath(req.URL.Path) {
 		// Defense in depth: the confidential fence allowlists tapped paths,
 		// but a dispatched request on any other route must still settle.
 		meter.SettlementFrom(req.Context()).Settle()
@@ -121,9 +125,10 @@ func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
 		_ = resp.Body.Close()
 		if err != nil || len(body) > maxUsageBody {
-			restoreBody(resp, body)
-			settle.Settle() // unparsable response: best-known counts are zeros
-			return nil
+			// Do not deliver truncated content: fail the response instead. The
+			// reverse proxy's ErrorHandler settles the reservation and answers
+			// 502, so nothing reaches the client unmetered.
+			return fmt.Errorf("upstream response unreadable or exceeds %d bytes", maxUsageBody)
 		}
 		restoreBody(resp, body)
 		usage, hasUsage := extractUsageJSON(body)
@@ -186,7 +191,8 @@ func scrubErrorBody(resp *http.Response) {
 }
 
 // sanitizeUpstreamMessage keeps the human-readable head of an upstream error
-// but cuts everything from the first traceback or file reference onward.
+// but cuts everything from the first traceback or file reference onward, and
+// masks absolute filesystem paths anywhere in what remains.
 func sanitizeUpstreamMessage(m string) string {
 	if i := strings.Index(m, "Traceback"); i >= 0 {
 		m = m[:i]
@@ -194,6 +200,7 @@ func sanitizeUpstreamMessage(m string) string {
 	if i := strings.Index(m, `File "`); i >= 0 {
 		m = m[:i]
 	}
+	m = absPathRE.ReplaceAllString(m, "<path>")
 	m = strings.TrimSpace(m)
 	if len(m) > 300 {
 		m = m[:300]
@@ -203,6 +210,8 @@ func sanitizeUpstreamMessage(m string) string {
 	}
 	return m
 }
+
+var absPathRE = regexp.MustCompile(`(?:/[\w.\-]+){2,}[^\s,"']*`)
 
 // mintReceipt signs the WP-7 per-request receipt (hash-only claims).
 func (t *UsageTap) mintReceipt(info *gate.RequestInfo, responseHash string, usage *usageCounts) (string, error) {
@@ -388,6 +397,10 @@ type sseTapReader struct {
 	hasher hash.Hash
 	usage  *usageCounts
 	fired  bool
+	// deltaCount counts content-bearing stream deltas seen so far. When a
+	// stream ends without a usage chunk — above all a client abort mid-stream —
+	// it is the best-known output count, so kept output is never free.
+	deltaCount int
 }
 
 func newSSETap(rc io.ReadCloser, tap *UsageTap, info *gate.RequestInfo, settle *meter.TerminalSettlement) *sseTapReader {
@@ -436,7 +449,12 @@ func (r *sseTapReader) Close() error {
 		r.fireUsage()
 	}
 	// Client abort, or the post-EOF close of a completed stream: settle
-	// exactly once with the observed counts (zeros when none arrived).
+	// exactly once with the observed counts — the terminal usage chunk when
+	// it arrived, otherwise the generated deltas actually delivered, so kept
+	// output is never free.
+	if r.usage == nil && r.deltaCount > 0 {
+		r.settle.Observe(0, 0, r.deltaCount)
+	}
 	r.settle.Settle()
 	return r.rc.Close()
 }
@@ -480,6 +498,7 @@ func (r *sseTapReader) scanLine(line []byte) {
 		r.curDone = true
 		return
 	}
+	r.deltaCount += outputDeltas(payload)
 	if !bytes.Contains(payload, []byte(`"usage"`)) {
 		return
 	}
@@ -518,7 +537,14 @@ func (r *sseTapReader) finalize() {
 	}
 	r.fireUsage()
 	// Terminal settle at upstream EOF: a completed stream carries the real
-	// observed counts, a usage-less stream settles zeros. Exactly once.
+	// observed counts; a usage-less stream still owes what was delivered, so
+	// settle the generated deltas rather than zeros. Exactly once.
+	if r.usage == nil && r.deltaCount > 0 {
+		r.settle.Observe(0, 0, r.deltaCount)
+		if r.tap.Logger != nil {
+			r.tap.Logger.Warn("stream ended without a usage chunk; settling observed deltas", "request_id", r.info.RequestID, "deltas", r.deltaCount)
+		}
+	}
 	r.settle.Settle()
 	if r.tap.Receipts != nil && r.err == nil {
 		if jws, err := r.tap.mintReceipt(r.info, "sha256:"+base64.RawURLEncoding.EncodeToString(r.hasher.Sum(nil)), r.usage); err == nil {
@@ -544,6 +570,40 @@ func (r *sseTapReader) fireUsage() {
 	if r.settle == nil {
 		r.tap.fire(r.info, *r.usage)
 	}
+}
+
+// outputDeltas counts content-bearing generation deltas in one streaming
+// data payload: any non-empty delta.content / reasoning_content (chat shape),
+// text (completions shape), or response.output_text.delta (Responses shape).
+// It is the best-known output count when a stream ends without a usage chunk.
+func outputDeltas(payload []byte) int {
+	var doc struct {
+		Type    string  `json:"type"`
+		Delta   *string `json:"delta"`
+		Choices []struct {
+			Text  *string `json:"text"`
+			Delta *struct {
+				Content          *string `json:"content"`
+				ReasoningContent *string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return 0
+	}
+	n := 0
+	if doc.Type == "response.output_text.delta" && doc.Delta != nil && *doc.Delta != "" {
+		n++
+	}
+	for _, c := range doc.Choices {
+		switch {
+		case c.Text != nil && *c.Text != "":
+			n++
+		case c.Delta != nil && ((c.Delta.Content != nil && *c.Delta.Content != "") || (c.Delta.ReasoningContent != nil && *c.Delta.ReasoningContent != "")):
+			n++
+		}
+	}
+	return n
 }
 
 func isBlankLine(line []byte) bool {

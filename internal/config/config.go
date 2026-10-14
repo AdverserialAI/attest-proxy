@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -194,7 +195,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ChatHost:               strings.ToLower(getenv("CHAT_HOST")),
 		ChatDocroot:            getenv("CHAT_DOCROOT"),
 		GPUEvidenceFile:        orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
-		EHBPIdentityB64:        getenv("EHBP_IDENTITY_B64"),
+		EHBPIdentityB64:        strings.TrimSpace(getenv("EHBP_IDENTITY_B64")),
 	}
 
 	authRequired, err := parseBoolDefault(getenv("AUTH_REQUIRED"), true)
@@ -222,6 +223,14 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		if cfg.AuthRequired {
 			return Config{}, fmt.Errorf("AUTH_REQUIRED must be 0 when CONFIDENTIAL_MODE is enabled; raw API keys must not enter the CVM")
 		}
+		if !cfg.EHBPRequired {
+			return Config{}, fmt.Errorf("EHBP_REQUIRED must be enabled in CONFIDENTIAL_MODE; plaintext request bodies must never reach the model")
+		}
+		if len(cfg.AttestedModels) == 0 {
+			// An empty filter would attest every model the upstream lists;
+			// confidential mode attests exactly the configured model.
+			cfg.AttestedModels = []string{cfg.ModelID}
+		}
 		if cfg.ModelDigest == "" && cfg.ModelManifestFile == "" {
 			return Config{}, fmt.Errorf("MODEL_DIGEST or MODEL_MANIFEST_FILE is required when CONFIDENTIAL_MODE is enabled")
 		}
@@ -234,9 +243,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			{"UPSTREAM_BEARER_TOKEN", cfg.UpstreamBearer},
 			{"RECEIPT_SIGNING_SEED", cfg.ReceiptSigningSeed},
 		} {
-			if required.value == "" {
+			if strings.TrimSpace(required.value) == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
 			}
+		}
+		for _, dir := range []struct{ name, value string }{
+			{"ENTITLEMENT_REPLAY_DIR", cfg.EntitlementReplayDir},
+			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
+		} {
+			if !filepath.IsAbs(dir.value) {
+				return Config{}, fmt.Errorf("%s must be an absolute path on the persistent state volume", dir.name)
+			}
+		}
+		if cfg.EntitlementReplayDir == cfg.MeterOutboxDir {
+			return Config{}, fmt.Errorf("ENTITLEMENT_REPLAY_DIR and METER_OUTBOX_DIR must be different directories")
 		}
 		if cfg.EHBPRequired && cfg.EHBPIdentityB64 == "" {
 			return Config{}, fmt.Errorf("EHBP_IDENTITY_B64 is required when EHBP_REQUIRED is enabled")
@@ -294,6 +314,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("DEV_MODE: %w", err)
 	}
 	cfg.DevMode = dev
+	if cfg.DevMode && cfg.ConfidentialMode {
+		return Config{}, fmt.Errorf("DEV_MODE and CONFIDENTIAL_MODE are mutually exclusive: synthetic evidence must never run against the live gate and billing")
+	}
+	if cfg.BillingURL != "" {
+		b, err := url.Parse(cfg.BillingURL)
+		if err != nil || b.Host == "" || b.User != nil || b.RawQuery != "" || b.Fragment != "" {
+			return Config{}, fmt.Errorf("BILLING_URL must be an absolute https://host URL")
+		}
+		host := b.Hostname()
+		loopback := host == "127.0.0.1" || host == "localhost" || host == "::1"
+		if b.Scheme != "https" && !(b.Scheme == "http" && loopback) {
+			return Config{}, fmt.Errorf("BILLING_URL must use https (http is allowed only for loopback)")
+		}
+	}
 	if !canonicalModelID.MatchString(cfg.ModelID) {
 		return Config{}, fmt.Errorf("MODEL_ID %q must use canonical publisher/model form", cfg.ModelID)
 	}
@@ -306,6 +340,21 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	u, err := url.Parse(cfg.Upstream)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return Config{}, fmt.Errorf("UPSTREAM %q must be an absolute http(s) URL", cfg.Upstream)
+	}
+	// A path/query-bearing UPSTREAM silently shifts every route the fence, gate,
+	// tap, and augmenter match on — metering and receipts all break.
+	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return Config{}, fmt.Errorf("UPSTREAM must be a bare http(s)://host URL with no userinfo, path, query, or fragment")
+	}
+	if cfg.ConfidentialMode {
+		if h := u.Hostname(); h != "127.0.0.1" && h != "localhost" && h != "::1" {
+			return Config{}, fmt.Errorf("UPSTREAM must be a loopback address in CONFIDENTIAL_MODE")
+		}
+	}
+	if cfg.ChatHost != "" {
+		if eu, err := url.Parse(cfg.Endpoint); err == nil && strings.EqualFold(eu.Hostname(), cfg.ChatHost) {
+			return Config{}, fmt.Errorf("CHAT_HOST must differ from the API endpoint hostname")
+		}
 	}
 
 	if hosts := getenv("TLS_HOSTNAMES"); hosts != "" {

@@ -27,6 +27,19 @@ import (
 // GET /v1/models, tap extracts usage counts from completion responses.
 func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *UsageTap, upstreamBearer ...string) *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(upstream)
+	base := rp.Director
+	rp.Director = func(req *http.Request) {
+		base(req)
+		// The stdlib strips hop-by-hop headers AFTER the director runs, using
+		// the Connection header's nominations: a client naming "Connection:
+		// Authorization" would strip the loopback credential injected below.
+		// Drop the nominations first so that is impossible.
+		req.Header.Del("Connection")
+		// Client-controlled forwarding headers never reach the model server.
+		req.Header.Del("X-Forwarded-For")
+		req.Header.Del("X-Forwarded-Host")
+		req.Header.Del("Forwarded")
+	}
 	if len(upstreamBearer) > 0 && upstreamBearer[0] != "" {
 		base := rp.Director
 		secret := upstreamBearer[0]
@@ -36,6 +49,18 @@ func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *Usag
 			// a separate sealed loopback credential, never a customer key or
 			// billing token.
 			req.Header.Set("Authorization", "Bearer "+secret)
+		}
+	}
+	if tap != nil {
+		base := rp.Director
+		rp.Director = func(req *http.Request) {
+			base(req)
+			// Tapped routes must arrive with identity encoding: a gzipped
+			// response would parse as zero usage (underbill) and corrupt the
+			// streamed receipt chunk. Force identity like /v1/models does.
+			if req.Method == http.MethodPost && tappablePath(req.URL.Path) {
+				req.Header.Del("Accept-Encoding")
+			}
 		}
 	}
 	if aug != nil {
@@ -89,6 +114,7 @@ func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *Usag
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		MaxIdleConns:          64,
+		MaxConnsPerHost:       64,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 5 * time.Second,

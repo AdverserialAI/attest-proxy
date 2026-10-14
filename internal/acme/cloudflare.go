@@ -101,6 +101,12 @@ func (c *CloudflareProvider) listTXT(ctx context.Context, zoneID, fqdn string) (
 // SetTXT creates or replaces the TXT record (Cloudflare upsert semantics)
 // with a short TTL so challenges converge and disappear quickly.
 func (c *CloudflareProvider) SetTXT(ctx context.Context, name, value string) error {
+	return c.SetTXTs(ctx, name, []string{value})
+}
+
+// SetTXTs upserts one TXT record per value: Cloudflare allows multiple TXT
+// records at one name, so an apex+wildcard order's two challenges coexist.
+func (c *CloudflareProvider) SetTXTs(ctx context.Context, name string, values []string) error {
 	zoneID, err := c.resolveZoneID(ctx)
 	if err != nil {
 		return err
@@ -110,26 +116,37 @@ func (c *CloudflareProvider) SetTXT(ctx context.Context, name, value string) err
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]any{
-		"type":    "TXT",
-		"name":    fqdn,
-		"content": value,
-		"ttl":     120,
-	})
-	if err != nil {
-		return err
+	existing := map[string]string{} // content -> record id
+	for _, rec := range records {
+		existing[rec.Content] = rec.ID
 	}
-	method := http.MethodPost
-	u := fmt.Sprintf("%s/zones/%s/dns_records", c.base(), url.PathEscape(zoneID))
-	if len(records) > 0 {
-		method = http.MethodPut
-		u += "/" + url.PathEscape(records[0].ID)
+	for i, value := range values {
+		body, err := json.Marshal(map[string]any{
+			"type":    "TXT",
+			"name":    fqdn,
+			"content": value,
+			"ttl":     120,
+		})
+		if err != nil {
+			return err
+		}
+		method := http.MethodPost
+		u := fmt.Sprintf("%s/zones/%s/dns_records", c.base(), url.PathEscape(zoneID))
+		if i == 0 && len(records) > 0 {
+			method = http.MethodPut
+			u += "/" + url.PathEscape(records[0].ID)
+		} else if _, ok := existing[value]; ok {
+			continue // already present with the right content
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, strings.NewReader(string(body)))
+		if err != nil {
+			return err
+		}
+		if err := c.do(req, nil); err != nil {
+			return err
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	return c.do(req, nil)
+	return nil
 }
 
 // DeleteTXT removes the TXT records at name, restricted to value when it is

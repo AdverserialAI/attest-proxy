@@ -22,19 +22,23 @@ import (
 
 // stubDNS records SetTXT/DeleteTXT calls.
 type stubDNS struct {
-	sets    map[string]string
+	sets    map[string][]string
 	deletes []string
 	setErr  error
 }
 
-func (s *stubDNS) SetTXT(_ context.Context, name, value string) error {
+func (s *stubDNS) SetTXT(ctx context.Context, name, value string) error {
+	return s.SetTXTs(ctx, name, []string{value})
+}
+
+func (s *stubDNS) SetTXTs(_ context.Context, name string, values []string) error {
 	if s.setErr != nil {
 		return s.setErr
 	}
 	if s.sets == nil {
-		s.sets = map[string]string{}
+		s.sets = map[string][]string{}
 	}
-	s.sets[name] = value
+	s.sets[name] = values
 	return nil
 }
 
@@ -267,13 +271,21 @@ func (m *mockACME) handler() http.Handler {
 		if m.authzValid[n] {
 			status = "valid"
 		}
+		// RFC 8555: a wildcard authz's identifier is the base domain with the
+		// wildcard flag, never the "*.domain" form.
+		identValue := m.domains[n]
+		wildcard := ""
+		if strings.HasPrefix(identValue, "*.") {
+			identValue = strings.TrimPrefix(identValue, "*.")
+			wildcard = `,"wildcard":true`
+		}
 		m.nextNonce(w)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":%q,"identifier":{"type":"dns","value":%q},`+
 			`"challenges":[{"type":"http-01","url":%q,"token":"no"},`+
-			`{"type":"dns-01","url":%q,"token":%q,"status":%q}]}`,
-			status, m.domains[n], m.base+"/ignore",
-			fmt.Sprintf("%s/chal/%d", m.base, n), m.tokens[n], status)
+			`{"type":"dns-01","url":%q,"token":%q,"status":%q}]%s}`,
+			status, identValue, m.base+"/ignore",
+			fmt.Sprintf("%s/chal/%d", m.base, n), m.tokens[n], status, wildcard)
 	})
 	mux.HandleFunc("POST /chal/", func(w http.ResponseWriter, r *http.Request) {
 		payload := m.verifyJWS(r, m.base+r.URL.Path)
@@ -417,8 +429,14 @@ func TestFullOrderFlow(t *testing.T) {
 			continue
 		}
 		want := txtValue(mock.tokens[i], thumb)
-		if got != want {
-			t.Errorf("TXT %s = %q, want %q", name, got, want)
+		found := false
+		for _, v := range got {
+			if v == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("TXT %s = %v, want it to include %q", name, got, want)
 		}
 	}
 	// Cleanup ran for every challenge.
@@ -477,5 +495,34 @@ func TestAccountReuseAcrossClients(t *testing.T) {
 		if client.accountURL != ts.URL+"/accounts/1" {
 			t.Errorf("accountURL = %q", client.accountURL)
 		}
+	}
+}
+
+// rc.21: an apex+wildcard order produces two authzs for the same challenge
+// name; both TXT values must be provisioned together (previously the second
+// overwrote the first and issuance always failed).
+func TestApexAndWildcardShareChallengeName(t *testing.T) {
+	domains := []string{"adverserial.ai", "*.adverserial.ai"}
+	mock := newMockACME(t, domains)
+	ts := httptest.NewServer(mock.handler())
+	defer ts.Close()
+	mock.base = ts.URL
+
+	accountKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	dns := &stubDNS{}
+	client := NewClient(Config{
+		DirectoryURL: ts.URL + "/directory",
+		Email:        "ops@adverserial.ai",
+		Zone:         "adverserial.ai",
+		DNS:          dns,
+		PollInterval: time.Millisecond,
+	}, accountKey)
+
+	if _, _, _, err := client.Obtain(context.Background(), domains); err != nil {
+		t.Fatalf("Obtain: %v", err)
+	}
+	got := dns.sets["_acme-challenge"]
+	if len(got) != 2 {
+		t.Fatalf("challenge values at _acme-challenge = %v, want both values provisioned", got)
 	}
 }

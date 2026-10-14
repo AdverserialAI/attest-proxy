@@ -69,8 +69,14 @@ func (g *GandiProvider) recordURL(name string) string {
 // SetTXT creates or replaces the TXT rrset (Gandi PUT semantics) with a
 // short TTL so challenges converge and disappear quickly.
 func (g *GandiProvider) SetTXT(ctx context.Context, name, value string) error {
+	return g.SetTXTs(ctx, name, []string{value})
+}
+
+// SetTXTs replaces the TXT rrset with every value in one PUT, so an
+// apex+wildcard order's two challenges coexist at the same name.
+func (g *GandiProvider) SetTXTs(ctx context.Context, name string, values []string) error {
 	body, err := json.Marshal(map[string]any{
-		"rrset_values": []string{value},
+		"rrset_values": values,
 		"rrset_ttl":    300,
 	})
 	if err != nil {

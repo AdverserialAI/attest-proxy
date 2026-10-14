@@ -63,17 +63,34 @@ func (c *GPUBundleCache) reload() {
 	}
 	data, err := os.ReadFile(c.Path)
 	if err != nil {
-		c.bundle = nil
-		return
+		return // keep the last-good bundle on a transient read failure
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		c.bundle = nil // malformed bundle: treat as absent, never serve garbage
+		// A mid-write (non-atomic) bundle must not flip the attestation epoch:
+		// keep serving the last-good bundle instead of treating it as absent.
 		return
+	}
+	// Evidence keys are digested canonically; only ASCII keys sort identically
+	// in Go (code-point order) and in JS (UTF-16 code-unit order). Anything
+	// else would make the published digest unverifiable, so reject the bundle.
+	for k := range parsed {
+		if !isASCII(k) {
+			return
+		}
 	}
 	c.bundle = parsed
 	c.modTime = fi.ModTime()
 	c.generatedAt, c.generatedAtOK = parseGeneratedAt(parsed)
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *GPUBundleCache) evidence(now time.Time) GPUEvidence {
@@ -86,7 +103,9 @@ func (c *GPUBundleCache) evidence(now time.Time) GPUEvidence {
 	}
 	// A bundle whose freshness cannot be established is marked stale — the
 	// client must never mistake unverifiable GPU evidence for fresh evidence.
-	if !c.generatedAtOK || now.Sub(c.generatedAt) > c.staleAfter() {
+	// Future-dated bundles (collector clock skew) count as unverifiable too:
+	// they would otherwise look perpetually fresh.
+	if !c.generatedAtOK || now.Sub(c.generatedAt) > c.staleAfter() || c.generatedAt.After(now.Add(60*time.Second)) {
 		ev.Stale = true
 	}
 	return ev

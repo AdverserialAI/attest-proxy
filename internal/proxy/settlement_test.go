@@ -263,9 +263,10 @@ func TestClientAbortAfterUsageSettlesObservedCounts(t *testing.T) {
 	assertSettlement(t, settlementClaims(t, dir), 11, 7, 2)
 }
 
-// TestClientAbortBeforeUsageSettlesZeros: when the client disconnects before
-// any usage chunk, settlement still fires — with zero counts.
-func TestClientAbortBeforeUsageSettlesZeros(t *testing.T) {
+// TestClientAbortBeforeUsageSettlesDeltas: when the client disconnects before
+// any usage chunk, settlement fires with the generated deltas actually
+// delivered — kept output is never free (R23-ABORT-001).
+func TestClientAbortBeforeUsageSettlesDeltas(t *testing.T) {
 	upstream := blockingStream(t,
 		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
 	)
@@ -281,7 +282,7 @@ func TestClientAbortBeforeUsageSettlesZeros(t *testing.T) {
 	}
 	readUntilLineContaining(t, resp.Body, `"delta"`)
 	resp.Body.Close()
-	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
+	assertSettlement(t, settlementClaims(t, dir), 0, 0, 1)
 }
 
 // TestSettleRecoverySettlesZeros: a panic in the confidential handler chain

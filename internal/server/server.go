@@ -8,11 +8,13 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/adverserial/attest-proxy/internal/attestation"
@@ -121,6 +123,9 @@ func (s *Server) Handler() http.Handler {
 		Enforce:            s.cfg.AuthRequired,
 		ConfidentialActive: s.cfg.ConfidentialActivation == "active",
 	}
+	if s.cfg.ConfidentialMode {
+		g.UpstreamReady = upstreamReadyProbe(upstream, s.cfg.UpstreamBearer)
+	}
 	tap := &proxy.UsageTap{
 		Logger: s.logger,
 		Receipts: &proxy.ReceiptConfig{
@@ -144,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 			panic("invalid confidential meter signer: " + err.Error())
 		}
 		replay := &entitlement.UsedStore{Dir: s.cfg.EntitlementReplayDir}
+		replay.StartSweeper(make(chan struct{})) // runs for the process lifetime
 		g.Confidential = true
 		g.Entitlements = &entitlement.Validator{Keys: keys, Issuer: s.cfg.EntitlementIssuer, Audience: s.cfg.EntitlementAudience}
 		g.Replay = replay
@@ -184,7 +190,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", fencedAPI(api))
 	}
 
-	return proxy.Logging(s.logger, s.cors(s.hostRouter(mux)))
+	return proxy.Logging(s.logger, secureHeaders(s.cors(s.hostRouter(mux))))
 }
 
 // fencedAPI forwards only the /v1/ model API to the upstream and refuses
@@ -212,6 +218,54 @@ func fencedAPIConfidential(next http.Handler) http.Handler {
 		if !allowed {
 			http.NotFound(w, r)
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// upstreamReadyProbe polls the inference backend's /health endpoint and
+// reports the latest state. The gate refuses admission while it is false, so
+// boot and crash windows never consume a single-use entitlement (the client
+// gets a clean 503 and retries instead of a burned 502).
+func upstreamReadyProbe(upstream *url.URL, bearer string) func() bool {
+	var ready atomic.Bool
+	health := *upstream
+	health.Path = "/health"
+	health.RawQuery = ""
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	go func() {
+		for {
+			ok := false
+			req, err := http.NewRequest(http.MethodGet, health.String(), nil)
+			if err == nil {
+				if bearer != "" {
+					req.Header.Set("Authorization", "Bearer "+bearer)
+				}
+				if resp, err := client.Do(req); err == nil {
+					ok = resp.StatusCode == http.StatusOK
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+					resp.Body.Close()
+				}
+			}
+			ready.Store(ok)
+			time.Sleep(2 * time.Second)
+		}
+	}()
+	return ready.Load
+}
+
+// quoteSem bounds concurrent TDX quote generation: the guest agent serializes
+// quotes, so beyond a handful of in-flight calls goroutines only pile up.
+var quoteSem = make(chan struct{}, 8)
+
+// secureHeaders sets baseline browser/API security headers on every response.
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -391,6 +445,15 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reportData := attestation.ReportData(nonceRaw, leaf.RawSubjectPublicKeyInfo, s.signer.PublicKeyDER(), ehbpPublicKey)
+	// Quote generation blocks on the dstack guest agent; bound concurrency so a
+	// flood of unauthenticated attestations cannot pile goroutines onto it.
+	select {
+	case quoteSem <- struct{}{}:
+		defer func() { <-quoteSem }()
+	default:
+		writeError(w, http.StatusServiceUnavailable, "attestation is busy; retry shortly")
+		return
+	}
 	quote, err := s.quotes.Quote(ctx, reportData)
 	if err != nil {
 		s.logger.Error("quote failed", "error", err.Error())

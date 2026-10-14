@@ -143,6 +143,8 @@ func TestSSEUsageTapByteIdentical(t *testing.T) {
 
 // TestSSEStreamWithoutUsage: a completed stream with no usage chunk still
 // settles the reservation — with zero counts (and no legacy usage event).
+// rc.21: a completed stream without a usage chunk settles the observed
+// deltas (was: zero counts, a free-completion hole).
 func TestSSEStreamWithoutUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -160,7 +162,7 @@ func TestSSEStreamWithoutUsage(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
+	assertSettlement(t, settlementClaims(t, dir), 0, 0, 1)
 	sink.expectNone(t, 200*time.Millisecond)
 }
 
@@ -385,4 +387,77 @@ func TestUntappedPathStillSettles(t *testing.T) {
 	resp.Body.Close()
 	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
 	sink.expectNone(t, 150*time.Millisecond)
+}
+
+// rc.21: an oversized (or unreadable) non-streaming response must never reach
+// the client — the response fails with 502 and the reservation settles via
+// the ErrorHandler, instead of truncated free content + zero settle.
+func TestOversizedNonStreamResponseFailsWith502(t *testing.T) {
+	big := make([]byte, maxUsageBody+1024)
+	for i := range big {
+		big[i] = 'a'
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(big)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	settle := newTestSettlement(t, dir)
+	sink := newRecordSink()
+	front := settlementChain(t, upstream, settle, sink)
+	resp, err := http.Post(front.URL+"/v1/chat/completions", "application/json", strings.NewReader(chatReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (oversized upstream body must not be delivered)", resp.StatusCode)
+	}
+	if len(body) > maxUsageBody {
+		t.Fatalf("client received %d bytes of unmetered content", len(body))
+	}
+	assertSettlement(t, settlementClaims(t, dir), 0, 0, 0)
+}
+
+func TestSanitizeUpstreamMessageStripsPaths(t *testing.T) {
+	cases := map[string]string{
+		`OSError: /sgl-workspace/sglang/python/sglang/srt/x.py: permission denied`: "permission denied",
+		`1 validation error:\n  File "/sgl-workspace/a/b.py", line 1\n    boom`:    "validation error",
+		`plain message`: "plain message",
+	}
+	for in, want := range cases {
+		got := sanitizeUpstreamMessage(in)
+		for _, leak := range []string{"/sgl-workspace", `File "`} {
+			if strings.Contains(got, leak) {
+				t.Errorf("sanitize(%q) leaks %q: %q", in, leak, got)
+			}
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("sanitize(%q) = %q, want it to keep %q", in, got, want)
+		}
+	}
+}
+
+func TestOutputDeltas(t *testing.T) {
+	cases := []struct {
+		payload string
+		want    int
+	}{
+		{`{"choices":[{"delta":{"content":"hi"}}]}`, 1},
+		{`{"choices":[{"delta":{"reasoning_content":"thinking"}}]}`, 1},
+		{`{"choices":[{"delta":{"content":""}}]}`, 0},
+		{`{"choices":[{"delta":{"role":"assistant","content":null}}]}`, 0},
+		{`{"choices":[{"text":" world"}]}`, 1},
+		{`{"type":"response.output_text.delta","delta":"chunk"}`, 1},
+		{`{"type":"response.completed","response":{"usage":{}}}`, 0},
+		{`[DONE]`, 0},
+		{`not json`, 0},
+	}
+	for _, tc := range cases {
+		if got := outputDeltas([]byte(tc.payload)); got != tc.want {
+			t.Errorf("outputDeltas(%s) = %d, want %d", tc.payload, got, tc.want)
+		}
+	}
 }

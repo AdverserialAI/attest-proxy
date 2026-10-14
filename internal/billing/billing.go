@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,13 +33,30 @@ type Client struct {
 	MeterIngressSecret string // direct-signed meter capability, never used for prompt traffic
 	WriterSecret       string
 	HTTP               *http.Client // optional; default 15s timeout
+	once               sync.Once
 }
+
+// noRedirects refuses to follow any redirect: billing endpoints answer in
+// place or not at all. A cross-host 307/308 would re-POST bodies carrying
+// full client API keys (auth check) or the meter-ingress capability, and a
+// 301/302 that ends in any 2xx would delete an outbox record that never
+// reached billing — redirects are therefore treated as errors, never success.
+var noRedirects = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	c.once.Do(func() {
+		c.HTTP = &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: noRedirects,
+			Transport: &http.Transport{
+				Proxy: nil, // ignore any HTTP(S)_PROXY in the workload environment
+			},
+		}
+	})
+	return c.HTTP
 }
 
 // Verdict is the /auth/check response.
@@ -109,13 +127,26 @@ func (c *Client) PostUsage(ctx context.Context, ev UsageEvent) error {
 }
 
 // StatusError is a non-2xx answer from billing. The meter outbox uses it to
-// distinguish permanent rejections (4xx — dead-letter the record and keep
-// flushing the rest of the queue) from transient failures (5xx, network —
-// abort and retry everything later).
+// distinguish permanent rejections (a small set of 4xx — dead-letter the
+// record and keep flushing the rest of the queue) from transient failures
+// (5xx, network, and every other status — abort and retry everything later).
 type StatusError struct{ Status int }
 
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("billing confidential write status %d", e.Status)
+}
+
+// permanent reports whether retrying this record can never succeed: 400
+// (malformed), 404 (gone), 409 (conflict), 422 (unprocessable). Rate limits
+// (429), timeouts (408), size limits (413) and auth rotation (401/403) are
+// deliberately transient — treating them as permanent silently dead-letters
+// every settlement posted during the episode.
+func (e *StatusError) Permanent() bool {
+	switch e.Status {
+	case 400, 404, 409, 422:
+		return true
+	}
+	return false
 }
 
 // PostMeter sends a proxy-signed, count-only confidential meter JWS through
@@ -232,7 +263,8 @@ func NewMutualTLSHTTPClient(certFile, keyFile, serverCAFile string) (*http.Clien
 		RootCAs:      roots,
 		MinVersion:   tls.VersionTLS13,
 	}
-	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
+	transport.Proxy = nil
+	return &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: noRedirects}, nil
 }
 
 // NewTLS13HTTPClient is used for direct signed count-only meter delivery.
@@ -242,5 +274,6 @@ func NewMutualTLSHTTPClient(certFile, keyFile, serverCAFile string) (*http.Clien
 func NewTLS13HTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
-	return &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	transport.Proxy = nil
+	return &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: noRedirects}
 }

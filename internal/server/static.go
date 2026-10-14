@@ -60,9 +60,17 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Clean against a rooted path so ".." cannot escape the docroot.
+	// Clean against a rooted path so ".." cannot escape the docroot, and never
+	// follow a symlink out of it.
 	p := path.Clean("/" + r.URL.Path)
 	full := filepath.Join(h.root, filepath.FromSlash(p))
+	if resolved, err := filepath.EvalSymlinks(full); err == nil {
+		if rootResolved, rerr := filepath.EvalSymlinks(h.root); rerr == nil &&
+			resolved != rootResolved && !strings.HasPrefix(resolved, rootResolved+string(filepath.Separator)) {
+			http.NotFound(w, r)
+			return
+		}
+	}
 
 	if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
 		h.serveFile(w, r, p, full)
@@ -89,6 +97,8 @@ func (h *staticHandler) serveFile(w http.ResponseWriter, r *http.Request, urlPat
 		http.NotFound(w, r)
 		return
 	}
+	// The SPA talks EHBP to this proxy and entitlements to billing; allow both.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https://billing.adverserial.ai; img-src 'self' data:; style-src 'self' 'unsafe-inline'")
 	switch {
 	case strings.HasPrefix(urlPath, "/_app/"):
 		// Hash-named, immutable build output.

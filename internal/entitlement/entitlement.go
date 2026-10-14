@@ -117,6 +117,11 @@ func (v Validator) Validate(token, requestedModel, expectedSPKI string, requestB
 	if zero.IssuedAt > now.Unix()+60 || zero.Expires <= now.Unix() || zero.Expires <= zero.IssuedAt {
 		return Claims{}, fmt.Errorf("expired or not-yet-valid entitlement")
 	}
+	// No entitlement may outlive a day, whatever billing minted: it bounds the
+	// replay store's retention and the window a stolen unused token stays live.
+	if zero.Expires-zero.IssuedAt > 86400 {
+		return Claims{}, fmt.Errorf("entitlement lifetime exceeds 24h")
+	}
 	if zero.ID == "" || !canonicalModelID.MatchString(zero.Model) || zero.Model != requestedModel || zero.MaxRequests != 1 || zero.MaxInputTokens < 1 || zero.MaxOutputTokens < 1 {
 		return Claims{}, fmt.Errorf("malformed or mismatched entitlement")
 	}

@@ -34,6 +34,9 @@ const DefaultRenewBefore = 30 * 24 * time.Hour
 type DNSProvider interface {
 	// SetTXT creates/replaces the TXT rrset at name with the given value.
 	SetTXT(ctx context.Context, name, value string) error
+	// SetTXTs creates/replaces the TXT rrset at name with all given values at
+	// once (apex+wildcard orders produce two values for one name).
+	SetTXTs(ctx context.Context, name string, values []string) error
 	// DeleteTXT removes the TXT rrset at name.
 	DeleteTXT(ctx context.Context, name, value string) error
 }
@@ -104,6 +107,12 @@ func (c *Client) Obtain(ctx context.Context, domains []string) (tls.Certificate,
 		chalURL  string
 	}
 	var pend []pending
+	// Group by challenge name first: an apex+wildcard order maps both authzs
+	// to the same _acme-challenge name, and provisioning them one at a time
+	// makes the second rrset overwrite the first (deterministic issuance
+	// failure). Every value must be present at once.
+	byName := map[string][]string{}
+	var names []string
 	for _, authzURL := range order.Authorizations {
 		authz, err := c.getAuthz(ctx, authzURL)
 		if err != nil {
@@ -113,19 +122,39 @@ func (c *Client) Obtain(ctx context.Context, domains []string) (tls.Certificate,
 		if chal == nil {
 			return tls.Certificate{}, nil, nil, fmt.Errorf("acme: no dns-01 challenge offered for %s", authz.Identifier.Value)
 		}
+		// The CA must only offer authorizations we asked for; a directory could
+		// otherwise trick us into proving control of an unrequested name.
+		ok := false
+		for _, d := range domains {
+			if strings.EqualFold(strings.TrimPrefix(d, "*."), strings.TrimPrefix(authz.Identifier.Value, "*.")) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return tls.Certificate{}, nil, nil, fmt.Errorf("acme: CA offered authorization for unrequested domain %q", authz.Identifier.Value)
+		}
 		name, err := ChallengeName(authz.Identifier.Value, c.cfg.Zone)
 		if err != nil {
 			return tls.Certificate{}, nil, nil, err
 		}
-		txt := txtValue(chal.Token, c.thumbprint)
-		if err := c.cfg.DNS.SetTXT(ctx, name, txt); err != nil {
+		if _, ok := byName[name]; !ok {
+			names = append(names, name)
+		}
+		byName[name] = append(byName[name], txtValue(chal.Token, c.thumbprint))
+		pend = append(pend, pending{authzURL: authzURL, chalURL: chal.URL})
+	}
+	for _, name := range names {
+		values := byName[name]
+		if err := c.cfg.DNS.SetTXTs(ctx, name, values); err != nil {
 			return tls.Certificate{}, nil, nil, fmt.Errorf("dns set %s: %w", name, err)
 		}
-		defer func() {
-			// Best-effort challenge cleanup; failures here are not fatal.
-			_ = c.cfg.DNS.DeleteTXT(context.Background(), name, txt)
-		}()
-		pend = append(pend, pending{authzURL: authzURL, chalURL: chal.URL})
+		for _, txt := range values {
+			defer func() {
+				// Best-effort challenge cleanup; failures here are not fatal.
+				_ = c.cfg.DNS.DeleteTXT(context.Background(), name, txt)
+			}()
+		}
 	}
 
 	if c.cfg.PropagationDelay > 0 {
@@ -207,7 +236,7 @@ func (c *Client) directory(ctx context.Context) (*directoryURLs, error) {
 		return nil, fmt.Errorf("acme: directory status %d", resp.StatusCode)
 	}
 	var dir directoryURLs
-	if err := json.NewDecoder(resp.Body).Decode(&dir); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&dir); err != nil {
 		return nil, fmt.Errorf("acme: directory decode: %w", err)
 	}
 	if dir.NewNonce == "" || dir.NewAccount == "" || dir.NewOrder == "" {

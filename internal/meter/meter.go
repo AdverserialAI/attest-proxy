@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adverserial/attest-proxy/internal/billing"
@@ -128,10 +129,31 @@ func (o Outbox) Enqueue(token string, claims Claims) error {
 	return f.Close()
 }
 
+// quarantine moves one record aside into the dead/ subdirectory so the flush
+// continues with everything queued behind it.
+func (o Outbox) quarantine(path, name string) error {
+	dead := filepath.Join(o.Dir, "dead", name)
+	if err := os.MkdirAll(filepath.Dir(dead), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(path, dead)
+}
+
+// flushMu serializes queue flushes: per-request settlement kicks and the 30s
+// retry loop otherwise fan out into N concurrent full-queue passes (duplicate
+// deliveries, O(records²) file I/O during a billing outage).
+var flushMu sync.Mutex
+
 func (o Outbox) Flush(ctx context.Context) error {
 	if o.Poster == nil {
 		return fmt.Errorf("meter poster is not configured")
 	}
+	flushMu.Lock()
+	defer flushMu.Unlock()
+	return o.flushLocked(ctx)
+}
+
+func (o Outbox) flushLocked(ctx context.Context) error {
 	entries, err := os.ReadDir(o.Dir)
 	if os.IsNotExist(err) {
 		return nil
@@ -151,21 +173,22 @@ func (o Outbox) Flush(ctx context.Context) error {
 		}
 		token := strings.TrimSpace(string(b))
 		if token == "" || len(token) > 16_384 {
-			return fmt.Errorf("invalid meter outbox record %q", e.Name())
+			// A corrupt record (crash mid-write, local tampering) must never
+			// jam the queue head-of-line either — quarantine and continue.
+			if qErr := o.quarantine(path, e.Name()); qErr != nil {
+				return qErr
+			}
+			continue
 		}
 		if err := o.Poster.PostMeter(ctx, token); err != nil {
 			var se *billing.StatusError
-			if errors.As(err, &se) && se.Status >= 400 && se.Status < 500 {
+			if errors.As(err, &se) && se.Permanent() {
 				// Permanent rejection (a record that outlived its signing
-				// window, a malformed file, ...): quarantine it and keep
-				// flushing — one bad record must never jam the durable queue
-				// head-of-line, which is how settled reservations leak.
-				dead := filepath.Join(o.Dir, "dead", e.Name())
-				if mkErr := os.MkdirAll(filepath.Dir(dead), 0o755); mkErr != nil {
-					return mkErr
-				}
-				if mvErr := os.Rename(path, dead); mvErr != nil {
-					return mvErr
+				// window, a malformed event): quarantine it and keep flushing —
+				// one bad record must never jam the durable queue head-of-line,
+				// which is how settled reservations leak.
+				if qErr := o.quarantine(path, e.Name()); qErr != nil {
+					return qErr
 				}
 				continue
 			}

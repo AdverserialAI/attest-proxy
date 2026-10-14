@@ -144,7 +144,7 @@ func TestHostOnlyNormalization(t *testing.T) {
 	cases := map[string]string{
 		"chat.adverserial.ai":      "chat.adverserial.ai",
 		"chat.adverserial.ai:8443": "chat.adverserial.ai",
-		"CHAT.Adverserial.AI:443":      "chat.adverserial.ai",
+		"CHAT.Adverserial.AI:443":  "chat.adverserial.ai",
 		"  chat.adverserial.ai ":   "chat.adverserial.ai",
 	}
 	for in, want := range cases {

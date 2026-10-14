@@ -36,6 +36,19 @@ import (
 // enforced (or proxied without usage attribution when it is not).
 const maxModelParseBody = 64 << 20
 
+// maxConfidentialBody caps confidential request bodies. Billing caps the
+// entitlement input bound at 6 MiB, so a larger body can never validate;
+// 8 MiB covers 6 MiB of prompt plus JSON escaping while keeping pre-auth
+// buffering proportionate. See the rc.21 audit (pre-auth memory DoS).
+const maxConfidentialBody = 8 << 20
+
+// maxBodyReadDuration bounds how long the gate spends reading one request
+// body: long enough for an 8 MiB upload at ~130 KiB/s, short enough that a
+// byte-at-a-time trickle can never finish. There is deliberately no server
+// ReadTimeout (SSE responses must stay open), so the gate bounds its own
+// pre-dispatch read instead.
+const maxBodyReadDuration = 60 * time.Second
+
 // RequestInfo carries per-request attribution and binding data extracted from
 // the request: model id, the client key's 8-char prefix, a fresh request id,
 // the request nonce (client-supplied X-Adverserial-Nonce or generated), and
@@ -93,6 +106,12 @@ type Gate struct {
 	// Confidential is true; ignored otherwise.
 	Meter *MeterConfig
 
+	// UpstreamReady reports whether the inference backend is accepting work.
+	// In confidential mode the gate refuses with 503 before any entitlement is
+	// consumed when it reports false (backend loading or crashed), so a
+	// retrying client never burns a single-use entitlement on a 502.
+	UpstreamReady func() bool
+
 	TTL time.Duration // verdict cache lifetime, default 60s
 
 	mu    sync.Mutex
@@ -127,6 +146,13 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "confidential inference is not active; attestation evidence collection is in progress")
 			return
 		}
+		if g.Confidential && g.UpstreamReady != nil && !g.UpstreamReady() {
+			// Backend loading or crashed: refuse before the entitlement is
+			// consumed or a reservation starts, so a retrying client burns
+			// nothing (the boot-window 502 entitlement burn).
+			writeError(w, http.StatusServiceUnavailable, "inference backend is warming up; retry shortly")
+			return
+		}
 		if g.Enforce && g.Billing == nil {
 			// Fail closed: misconfiguration must never serve inference.
 			writeError(w, http.StatusServiceUnavailable, "authentication not configured")
@@ -141,8 +167,14 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 
 		// Buffer the body once; the model field is needed for the auth check
 		// and for usage attribution. The buffered body is restored verbatim
-		// for the upstream.
-		body, restore, over, err := readBody(r.Body)
+		// for the upstream. Confidential bodies are capped far lower than
+		// legacy: billing's 6 MiB entitlement input bound means nothing
+		// larger can ever validate, so pre-auth buffering stays proportionate.
+		limit := maxModelParseBody
+		if g.Confidential {
+			limit = maxConfidentialBody
+		}
+		body, restore, over, err := readBody(r.Body, limit)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "could not read request body")
 			return
@@ -162,12 +194,12 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		r.Body = restore()
 		r.ContentLength = int64(len(body))
 
-		var parsed struct {
-			Model     string `json:"model"`
-			MaxTokens *int   `json:"max_tokens"`
+		parsedModel, parsedMaxOut, parseErr := parseRequestLimits(g.Confidential, body)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, parseErr.Error())
+			return
 		}
-		_ = json.Unmarshal(body, &parsed) // malformed JSON → empty model
-		if (g.Enforce || g.Confidential) && parsed.Model == "" {
+		if (g.Enforce || g.Confidential) && parsedModel == "" {
 			writeError(w, http.StatusBadRequest, "request body must be JSON with a \"model\" field")
 			return
 		}
@@ -190,7 +222,7 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		clientBodyLen := len(body)
 
 		info := &RequestInfo{
-			Model:           parsed.Model,
+			Model:           parsedModel,
 			KeyPrefix:       keyPrefix(key),
 			RequestID:       g.newRequestID(),
 			RequestNonce:    nonce,
@@ -212,13 +244,13 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			// A byte-level tokenizer cannot emit more tokens than UTF-8 bytes;
 			// using the exact raw JSON body is therefore a conservative local
 			// input bound without parsing or retaining prompt content.
-			if parsed.MaxTokens == nil || *parsed.MaxTokens < 1 {
+			if parsedMaxOut < 1 {
 				writeError(w, http.StatusBadRequest, "confidential requests require a positive max_tokens")
 				return
 			}
-			claims, err := g.Entitlements.Validate(key, parsed.Model, g.ActiveSPKI(), clientBodyLen, *parsed.MaxTokens)
+			claims, err := g.Entitlements.Validate(key, parsedModel, g.ActiveSPKI(), clientBodyLen, parsedMaxOut)
 			if err != nil {
-				g.Logger.Info("confidential entitlement denied", "model", parsed.Model, "reason", err.Error())
+				g.Logger.Info("confidential entitlement denied", "model", parsedModel, "reason", err.Error())
 				writeError(w, http.StatusUnauthorized, "invalid, expired, replayed, or mismatched confidential entitlement")
 				return
 			}
@@ -252,7 +284,7 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		verdict, err := g.check(r.Context(), key, parsed.Model)
+		verdict, err := g.check(r.Context(), key, parsedModel)
 		if err != nil {
 			// Fail closed: billing unreachable or non-200 → no inference.
 			g.Logger.Warn("billing auth check failed", "error", err.Error())
@@ -393,15 +425,18 @@ func newNonce() string {
 	return base64.RawURLEncoding.EncodeToString(b[:])
 }
 
-// readBody reads up to maxModelParseBody bytes. When the body is larger,
-// over=true and restore reassembles the full stream for the upstream.
-func readBody(rc io.ReadCloser) (body []byte, restore func() io.ReadCloser, over bool, err error) {
+// readBody reads up to limit bytes. When the body is larger, over=true and
+// restore reassembles the full stream for the upstream. The whole read is
+// bounded by maxBodyReadDuration, so a byte-at-a-time trickle can never
+// finish (there is deliberately no server ReadTimeout for SSE responses).
+func readBody(rc io.ReadCloser, limit int) (body []byte, restore func() io.ReadCloser, over bool, err error) {
 	buf := make([]byte, 0, 64<<10)
 	tmp := make([]byte, 32<<10)
+	deadline := time.Now().Add(maxBodyReadDuration)
 	for {
 		n, rerr := rc.Read(tmp)
 		buf = append(buf, tmp[:n]...)
-		if len(buf) > maxModelParseBody {
+		if len(buf) > limit {
 			return buf, func() io.ReadCloser {
 				return struct {
 					io.Reader
@@ -415,6 +450,10 @@ func readBody(rc io.ReadCloser) (body []byte, restore func() io.ReadCloser, over
 		if rerr != nil {
 			rc.Close()
 			return nil, nil, false, rerr
+		}
+		if time.Now().After(deadline) {
+			rc.Close()
+			return nil, nil, false, fmt.Errorf("request body read exceeded %s", maxBodyReadDuration)
 		}
 	}
 	_ = rc.Close()

@@ -31,14 +31,18 @@ func (s Store) certPath() string       { return filepath.Join(s.Dir, "certificat
 func (s Store) keyPath() string        { return filepath.Join(s.Dir, "certificate.key") }
 
 // AccountKey loads the persisted account key, or generates, persists, and
-// returns a fresh P-256 key on first use.
+// returns a fresh P-256 key on first use. Only a missing file triggers
+// generation: a transient read error must never silently orphan the account.
 func (s Store) AccountKey() (*ecdsa.PrivateKey, error) {
-	if data, err := os.ReadFile(s.accountKeyPath()); err == nil {
+	data, err := os.ReadFile(s.accountKeyPath())
+	if err == nil {
 		key, err := parsePrivateKeyPEM(data)
 		if err != nil {
 			return nil, fmt.Errorf("acme store: load account key: %w", err)
 		}
 		return key, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("acme store: read account key: %w", err)
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -55,6 +59,7 @@ func (s Store) AccountKey() (*ecdsa.PrivateKey, error) {
 	if err := os.WriteFile(s.accountKeyPath(), pemBytes, 0o600); err != nil {
 		return nil, fmt.Errorf("acme store: save account key: %w", err)
 	}
+	_ = os.Chmod(s.accountKeyPath(), 0o600) // WriteFile keeps pre-existing looser modes
 	return key, nil
 }
 
@@ -84,22 +89,56 @@ func (s Store) LoadCert(domains []string, renewBefore time.Duration, now time.Ti
 			return tls.Certificate{}, false
 		}
 	}
-	// Renew when fewer than renewBefore remain.
-	if !leaf.NotAfter.After(now.Add(renewBefore)) {
+	// Renew when fewer than renewBefore remain, and never serve a not-yet-valid
+	// certificate (clock jump during issuance, restored backup).
+	if !leaf.NotAfter.After(now.Add(renewBefore)) || now.Before(leaf.NotBefore) {
 		return tls.Certificate{}, false
 	}
 	return cert, true
 }
 
-// SaveCert persists an issued chain and its key.
+// SaveCert persists an issued chain and its key: atomically (tmp + rename), so
+// a crash can never leave a mismatched or truncated pair that spirals into
+// re-issuance and CA rate limits.
 func (s Store) SaveCert(chainPEM, keyPEM []byte) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.keyPath(), keyPEM, 0o600); err != nil {
+	if err := writeAtomic(s.keyPath(), keyPEM, 0o600); err != nil {
 		return err
 	}
-	return os.WriteFile(s.certPath(), chainPEM, 0o644)
+	if err := writeAtomic(s.certPath(), chainPEM, 0o644); err != nil {
+		return err
+	}
+	if d, err := os.Open(s.Dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".atomic-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode) // also tightens any pre-existing looser mode
 }
 
 // LoadOrIssue returns a usable certificate for domains: the persisted one
@@ -122,17 +161,29 @@ func LoadOrIssue(ctx context.Context, store Store, client *Client, domains []str
 }
 
 // parsePrivateKeyPEM accepts PKCS#8 ("PRIVATE KEY") and SEC1
-// ("EC PRIVATE KEY") PEM blocks.
+// ("EC PRIVATE KEY") PEM blocks. Only P-256 is accepted: the JWS/thumbprint
+// code hardcodes the P-256 size, and anything else would panic at startup.
 func parsePrivateKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block")
 	}
-	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		if ec, ok := key.(*ecdsa.PrivateKey); ok {
-			return ec, nil
+	var key *ecdsa.PrivateKey
+	if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		ec, ok := k.(*ecdsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("PKCS#8 key is %T, want ECDSA", k)
 		}
-		return nil, fmt.Errorf("PKCS#8 key is %T, want ECDSA", key)
+		key = ec
+	} else {
+		ec, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		key = ec
 	}
-	return x509.ParseECPrivateKey(block.Bytes)
+	if key.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("account key uses %s, want P-256", key.Curve.Params().Name)
+	}
+	return key, nil
 }

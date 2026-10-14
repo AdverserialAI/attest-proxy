@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -64,8 +65,9 @@ func (a *ModelsAugmenter) ModifyResponse(resp *http.Response) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelsBody+1))
 	_ = resp.Body.Close()
 	if err != nil || len(body) > maxModelsBody {
-		restoreBody(resp, body)
-		return nil
+		// Never serve a truncated models document as a 200: fail the response
+		// so the client sees a clean 502 instead of broken JSON.
+		return fmt.Errorf("upstream models response unreadable or exceeds %d bytes", maxModelsBody)
 	}
 
 	out := a.Augment(body)

@@ -43,12 +43,23 @@ func env(name string) (string, error) {
 	return value, nil
 }
 
-func hashFile(path string) (string, error) {
+// hashFile opens the candidate after the walk's lstat checks and re-verifies
+// via fstat that it is still a regular file: a swap to a symlink between
+// lstat and open can never turn the measurement into a hash oracle for
+// arbitrary files outside the root.
+func hashFile(path string, wantInfo fs.FileInfo) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
+	st, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !st.Mode().IsRegular() || (wantInfo != nil && !os.SameFile(st, wantInfo)) {
+		return "", fmt.Errorf("model artifact changed during measurement: %s", path)
+	}
 	h := sha256.New()
 	if _, err := io.Copy(h, file); err != nil {
 		return "", err
@@ -94,7 +105,7 @@ func measure(root, modelID string) (manifest, error) {
 		if err != nil {
 			return err
 		}
-		sum, err := hashFile(path)
+		sum, err := hashFile(path, info)
 		if err != nil {
 			return err
 		}
@@ -147,7 +158,15 @@ func writeAtomic(path string, value manifest) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Flush the directory entry too, or a crash can silently lose the rename.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 func main() {
@@ -165,6 +184,15 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	// A manifest inside the measured root would be hashed into the next run,
+	// making digests run-to-run nondeterministic.
+	if absRoot, err1 := filepath.Abs(root); err1 == nil {
+		if absOut, err2 := filepath.Abs(out); err2 == nil &&
+			(absOut == absRoot || strings.HasPrefix(absOut, absRoot+string(filepath.Separator))) {
+			fmt.Fprintln(os.Stderr, "MODEL_MANIFEST_FILE must not live inside MODEL_ROOT")
+			os.Exit(2)
+		}
 	}
 	started := time.Now()
 	result, err := measure(root, modelID)

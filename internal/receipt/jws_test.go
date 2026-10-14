@@ -94,7 +94,11 @@ func TestMintRoundTrip(t *testing.T) {
 // TestTamperedReceiptFails: flipping a payload byte must break verification,
 // as must signing with a different key.
 func TestSignerFromSeedIsStableAndValid(t *testing.T) {
-	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	seedBytes := make([]byte, 32)
+	for i := range seedBytes {
+		seedBytes[i] = byte(i + 1)
+	}
+	seed := base64.RawURLEncoding.EncodeToString(seedBytes)
 	first, err := NewSignerFromSeed(seed)
 	if err != nil {
 		t.Fatal(err)
@@ -185,5 +189,14 @@ func mustDecodeB64JSON(t *testing.T, s string, v any) {
 	}
 	if err := json.Unmarshal(raw, v); err != nil {
 		t.Fatalf("json decode: %v", err)
+	}
+}
+
+// rc.21: a seed mapping to d=1 (e.g. all-zero input) is rejected — the public
+// key would be the P-256 generator, forgeable by anyone.
+func TestSignerFromSeedRejectsDegenerateScalar(t *testing.T) {
+	zero := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	if _, err := NewSignerFromSeed(zero); err == nil {
+		t.Fatal("degenerate seed accepted")
 	}
 }
