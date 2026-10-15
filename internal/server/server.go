@@ -44,6 +44,12 @@ type Server struct {
 	gpu    *attestation.GPUBundleCache
 	ehbp   *ehbpidentity.Identity
 
+	// attestationRate sheds /attestation floods: quotes can't be cached
+	// (nonce-bound), so excess must 429 instead of occupying every quote slot.
+	// A 20-burst plus a steady 30/min covers every legitimate verification
+	// pattern (harness boot, manual /adverserial-verify checks).
+	attestationRate *rateBucket
+
 	// now is a test hook; production uses time.Now.
 	now         func() time.Time
 	meterOutbox *meter.Outbox
@@ -74,15 +80,16 @@ func New(
 		receiver = ehbpIdentity[0]
 	}
 	return &Server{
-		cfg:          cfg,
-		logger:       logger,
-		quotes:       quotes,
-		signer:       signer,
-		holder:       holder,
-		gpu:          gpu,
-		ehbp:         receiver,
-		now:          time.Now,
-		ingressSlots: make(chan struct{}, maxConfidentialIngress),
+		cfg:             cfg,
+		logger:          logger,
+		quotes:          quotes,
+		signer:          signer,
+		holder:          holder,
+		gpu:             gpu,
+		ehbp:            receiver,
+		now:             time.Now,
+		attestationRate: newRateBucket(20, 0.5),
+		ingressSlots:    make(chan struct{}, maxConfidentialIngress),
 	}
 }
 
@@ -267,6 +274,42 @@ func upstreamReadyProbe(upstream *url.URL, bearer string) func() bool {
 // quotes, so beyond a handful of in-flight calls goroutines only pile up.
 var quoteSem = make(chan struct{}, 8)
 
+// rateBucket is a conservative global token bucket for the public attestation
+// endpoints: quotes can't be cached (nonce-bound), so a sustained flood must
+// shed with 429 instead of occupying every quote slot and starving legitimate
+// verifications. Deliberately global (no per-IP trust in forwarding headers).
+type rateBucket struct {
+	mu       sync.Mutex
+	tokens   float64
+	last     time.Time
+	capacity float64
+	refill   float64 // tokens per second
+	nowFn    func() time.Time
+}
+
+func newRateBucket(capacity, refillPerSecond float64) *rateBucket {
+	return &rateBucket{tokens: capacity, last: time.Now(), capacity: capacity, refill: refillPerSecond, nowFn: time.Now}
+}
+
+func (b *rateBucket) allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.nowFn()
+	elapsed := now.Sub(b.last).Seconds()
+	if elapsed > 0 {
+		b.tokens += elapsed * b.refill
+		if b.tokens > b.capacity {
+			b.tokens = b.capacity
+		}
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 // secureHeaders sets baseline browser/API security headers on every response.
 func secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +464,11 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.attestationRate.allow() {
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusTooManyRequests, "attestation rate limited; retry shortly")
 		return
 	}
 

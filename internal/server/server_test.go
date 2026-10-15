@@ -661,3 +661,22 @@ func TestConfidentialFenceAllowlist(t *testing.T) {
 		t.Errorf("next reached %d times, want %d (denied paths must never dispatch)", reached, len(allowed))
 	}
 }
+
+// rc.23: the attestation endpoints shed floods with 429 while the quote
+// semaphore keeps concurrency bounded; a legitimate verification recovers
+// promptly once the burst ends.
+func TestAttestationRateBucketShedsAndRecovers(t *testing.T) {
+	b := newRateBucket(4, 2)
+	for i := 0; i < 4; i++ {
+		if !b.allow() {
+			t.Fatalf("burst token %d should be allowed", i)
+		}
+	}
+	if b.allow() {
+		t.Fatal("5th immediate request must be rejected (bucket empty)")
+	}
+	b.nowFn = func() time.Time { return time.Now().Add(2 * time.Second) }
+	if !b.allow() {
+		t.Fatal("bucket must refill after the burst")
+	}
+}

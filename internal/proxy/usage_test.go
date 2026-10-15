@@ -461,3 +461,41 @@ func TestOutputDeltas(t *testing.T) {
 		}
 	}
 }
+
+// rc.23: a malformed upstream emitting many newline-terminated lines without
+// a blank separator must never grow the tap unboundedly: the stream aborts
+// with a sanitized failure, no receipt chunk, exactly one settlement.
+func TestSSEEventByteBudget(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		var b strings.Builder
+		for b.Len() < maxSSEEventBytes+4096 {
+			b.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n") // never blank
+		}
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	settle := newTestSettlement(t, dir)
+	sink := newRecordSink()
+	front := settlementChain(t, upstream, settle, sink)
+	resp, err := http.Post(front.URL+"/v1/chat/completions", "application/json", strings.NewReader(chatReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if len(body) > maxSSEEventBytes+8192 {
+		t.Fatalf("client received %d bytes — event buffer was unbounded", len(body))
+	}
+	if bytes.Contains(body, []byte("adverserial_receipt")) {
+		t.Error("receipt minted for an aborted oversized-event stream")
+	}
+	m := settlementClaims(t, dir)
+	if m["input_tokens"].(float64) != 0 || m["cached_tokens"].(float64) != 0 {
+		t.Errorf("input/cached = %v/%v, want 0/0", m["input_tokens"], m["cached_tokens"])
+	}
+	if m["output_tokens"].(float64) <= 0 {
+		t.Error("expected the observed deltas to be settled, got zero output")
+	}
+}

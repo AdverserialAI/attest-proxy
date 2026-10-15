@@ -7,7 +7,7 @@
 
 # Go 1.26 provides the RFC 9180 HPKE implementation required by the
 # standards-based EHBP reference transport.
-FROM golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS build
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
 WORKDIR /src
 
 # Injected by the release workflow as the git tag; attestation evidence

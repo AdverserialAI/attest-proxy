@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -33,6 +34,14 @@ const maxUsageBody = 8 << 20
 // maxSSEScanLine bounds the tap's partial-line buffer; a longer single line
 // (pathological) drops scan state but never alters forwarded bytes.
 const maxSSEScanLine = 1 << 20
+
+// maxSSEEventBytes bounds the accumulation of ONE SSE event (cur) plus any
+// held terminal event: a malformed upstream sending many newline-terminated
+// lines without a blank separator would otherwise grow the tap unboundedly.
+const maxSSEEventBytes = 1 << 20
+
+// errSSEEventTooLarge aborts a stream whose single event exceeds the budget.
+var errSSEEventTooLarge = errors.New("sse event exceeds the 1 MiB budget")
 
 // ReceiptTTL is the WP-7 per-request receipt validity window (iat → exp).
 const ReceiptTTL = 120 * time.Second
@@ -477,6 +486,15 @@ func (r *sseTapReader) process(data []byte) {
 		r.scanLine(line)
 		r.cur = append(r.cur, line...)
 		r.cur = append(r.cur, '\n')
+		if len(r.cur)+len(r.hold) > maxSSEEventBytes {
+			// One event ballooned past the budget: abort the stream — drop the
+			// partial event and any held terminator (the client sees a truncated
+			// stream with no receipt), mint no receipt, settle observed counts.
+			r.cur, r.hold, r.in = nil, nil, nil
+			r.err = errSSEEventTooLarge
+			r.eof = true
+			return
+		}
 		if isBlankLine(line) {
 			r.dispatchEvent()
 		}
