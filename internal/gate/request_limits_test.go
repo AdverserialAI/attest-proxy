@@ -57,3 +57,26 @@ func TestParseRequestLimitsLegacyLenient(t *testing.T) {
 		t.Errorf("legacy parse = %q/%d, want m/x/64", model, maxOut)
 	}
 }
+
+func TestFanoutMultiplicityRejected(t *testing.T) {
+	reject := []string{
+		`{"model":"m/x","max_tokens":16,"n":64}`,
+		`{"model":"m/x","max_tokens":16,"n":2}`,
+		`{"model":"m/x","max_tokens":16,"best_of":4}`,
+		`{"model":"m/x","max_tokens":16,"n":"64"}`,
+	}
+	for _, body := range reject {
+		if _, _, err := parseRequestLimits(true, []byte(body)); err == nil {
+			t.Errorf("must reject fan-out: %s", body)
+		}
+	}
+	for _, body := range []string{
+		`{"model":"m/x","max_tokens":16,"n":1}`,
+		`{"model":"m/x","max_tokens":16,"best_of":1}`,
+		`{"model":"m/x","max_tokens":16}`,
+	} {
+		if _, _, err := parseRequestLimits(true, []byte(body)); err != nil {
+			t.Errorf("must accept %s: %v", body, err)
+		}
+	}
+}

@@ -48,6 +48,11 @@ type Server struct {
 	now         func() time.Time
 	meterOutbox *meter.Outbox
 	meterOnce   sync.Once
+	// ingressSlots bounds work admitted before an entitlement can be checked.
+	// EHBP must decrypt the request body before the gate can validate the
+	// entitlement; without this bound, an anonymous client could fan out
+	// expensive body work and pressure the proxy before authentication.
+	ingressSlots chan struct{}
 }
 
 // New assembles the server. holder supplies the active serving certificate;
@@ -69,14 +74,15 @@ func New(
 		receiver = ehbpIdentity[0]
 	}
 	return &Server{
-		cfg:    cfg,
-		logger: logger,
-		quotes: quotes,
-		signer: signer,
-		holder: holder,
-		gpu:    gpu,
-		ehbp:   receiver,
-		now:    time.Now,
+		cfg:          cfg,
+		logger:       logger,
+		quotes:       quotes,
+		signer:       signer,
+		holder:       holder,
+		gpu:          gpu,
+		ehbp:         receiver,
+		now:          time.Now,
+		ingressSlots: make(chan struct{}, maxConfidentialIngress),
 	}
 }
 
@@ -176,7 +182,10 @@ func (s *Server) Handler() http.Handler {
 		if s.ehbp == nil {
 			panic("EHBP_REQUIRED without receiver key")
 		}
-		api = s.requireEHBP(s.ehbp.Middleware()(api))
+		// The ingress guard is deliberately outside the EHBP middleware: the
+		// encrypted wire body has to be limited and time-bounded before EHBP
+		// allocates/decrypts a frame and before the gate can inspect plaintext.
+		api = s.requireEHBP(s.confidentialIngressGuard(s.ehbp.Middleware()(api)))
 		mux.HandleFunc(ehbpprotocol.KeysPath, s.ehbp.ConfigHandler)
 	}
 	// Fence the model API surface: in confidential mode only the metered and

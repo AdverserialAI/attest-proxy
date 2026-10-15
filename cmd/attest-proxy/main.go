@@ -105,6 +105,10 @@ func run(logger *slog.Logger) error {
 		TLSConfig:         server.TLSConfig(holder),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// Entitlements and EHBP configuration fit comfortably within 64 KiB.
+		// The default 1 MiB header budget unnecessarily amplifies a concurrent
+		// header flood before any application middleware can run.
+		MaxHeaderBytes: 64 << 10,
 		// No ReadTimeout/WriteTimeout: inference streams may stay open for
 		// many minutes.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),

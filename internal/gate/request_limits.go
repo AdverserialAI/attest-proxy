@@ -14,8 +14,16 @@ import (
 var controlKeys = map[string]bool{
 	"model": true, "max_tokens": true, "max_completion_tokens": true,
 	"max_output_tokens": true, "stream": true, "stream_options": true,
-	"chat_template": true,
+	"chat_template": true, "n": true, "best_of": true,
 }
+
+// fanoutKeys multiply generation server-side: n parallel completions (or
+// best_of candidates) each count toward output usage, but a single-sequence
+// bound covers them only once — an unvalidated n=64 with max_tokens=64
+// generated 4069 tokens against a 64-token bound (63x undercharge) and
+// occupies one admission slot for 64 sequences. Confidential mode is
+// single-sequence only.
+var fanoutKeys = []string{"n", "best_of"}
 
 // limitKeys are every completion-limit spelling the upstream honors. The gate
 // must bind the maximum of all of them: binding only max_tokens while the
@@ -92,6 +100,16 @@ func parseRequestLimits(confidential bool, body []byte) (model string, maxOut in
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return "", 0, nil // malformed JSON → empty model, reported by the caller
 	}
+	// The upstream's field matching may differ from encoding/json's. Accepting
+	// a single mixed-case control key would therefore make the admission parser
+	// and model server disagree about a generation-affecting value. Confidential
+	// requests use the documented lowercase spelling only.
+	for key := range doc {
+		fold := strings.ToLower(key)
+		if controlKeys[fold] && key != fold {
+			return "", 0, fmt.Errorf("control field %q must use lowercase spelling %q", key, fold)
+		}
+	}
 	if raw, ok := doc["model"]; ok {
 		_ = json.Unmarshal(raw, &model) // non-string → empty model
 	}
@@ -111,6 +129,23 @@ func parseRequestLimits(confidential bool, body []byte) (model string, maxOut in
 		}
 		if int(f) > maxOut {
 			maxOut = int(f)
+		}
+	}
+	for _, k := range fanoutKeys {
+		raw, ok := doc[k]
+		if !ok {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return "", 0, fmt.Errorf("%s must be a positive integer", k)
+		}
+		f, ok := v.(float64)
+		if !ok || f != float64(int(f)) || f < 1 {
+			return "", 0, fmt.Errorf("%s must be a positive integer", k)
+		}
+		if int(f) != 1 {
+			return "", 0, fmt.Errorf("%s > 1 is not supported on this endpoint (parallel generations are not metered per-request)", k)
 		}
 	}
 	return model, maxOut, nil
