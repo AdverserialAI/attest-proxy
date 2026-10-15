@@ -194,7 +194,7 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		r.Body = restore()
 		r.ContentLength = int64(len(body))
 
-		parsedModel, parsedMaxOut, parseErr := parseRequestLimits(g.Confidential, body)
+		parsedModel, parsedMaxOut, parseErr := parseRequestLimits(g.Confidential, r.URL.Path, body)
 		if parseErr != nil {
 			writeError(w, http.StatusBadRequest, parseErr.Error())
 			return

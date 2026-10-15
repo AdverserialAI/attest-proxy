@@ -73,7 +73,12 @@ func okHandler(t *testing.T) http.Handler {
 
 func postChat(t *testing.T, h http.Handler, key, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	return postPath(t, h, key, "/v1/chat/completions", body)
+}
+
+func postPath(t *testing.T, h http.Handler, key, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
@@ -131,6 +136,56 @@ func TestConfidentialGateUsesEntitlementOnce(t *testing.T) {
 	// replay and validation failures refuse before billing is contacted.
 	if got := stub.calls.Load(); got != 1 {
 		t.Errorf("start calls = %d, want 1", got)
+	}
+}
+
+// A malformed sampler control must be rejected before a one-use entitlement
+// is consumed or a /cc/start reservation is registered. This keeps a hostile
+// top-k/logprob request from both reaching SGLang and burning a customer's
+// usable entitlement.
+func TestConfidentialGateRejectsUnsafeSamplerBeforeReservation(t *testing.T) {
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	up := &countingHandler{t: t}
+	token := signedEntitlement(t, private, "billing", testEntitlementClaims("unsafe-sampler", now))
+	body := `{"model":"lordx64/cyberglm","max_tokens":32,"logprobs":true,"top_logprobs":1000000,"messages":[{"role":"user","content":"hi"}]}`
+	rec := postChat(t, g.Middleware(up.handler()), token, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("upstream hits = %d, want 0", up.hits.Load())
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatalf("start calls = %d, want 0", stub.calls.Load())
+	}
+	if strings.Contains(rec.Body.String(), "hi") {
+		t.Fatal("sampler rejection reflected prompt content")
+	}
+}
+
+// Output limits are endpoint-specific in SGLang. A Chat-only limit on the
+// Responses endpoint (or vice versa) may be ignored upstream; it must not be
+// accepted as the bound of a one-use entitlement.
+func TestConfidentialGateRejectsIgnoredOutputLimitBeforeReservation(t *testing.T) {
+	stub := &startStub{resp: `{"stored":true,"started":false}`}
+	bs := stub.server()
+	defer bs.Close()
+	g, private, now := newStartGate(t, bs.URL)
+	up := &countingHandler{t: t}
+	token := signedEntitlement(t, private, "billing", testEntitlementClaims("wrong-output-limit", now))
+	body := `{"model":"lordx64/cyberglm","max_tokens":1,"input":"hi"}`
+	rec := postPath(t, g.Middleware(up.handler()), token, "/v1/responses", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("upstream hits = %d, want 0", up.hits.Load())
+	}
+	if stub.calls.Load() != 0 {
+		t.Fatalf("start calls = %d, want 0", stub.calls.Load())
 	}
 }
 

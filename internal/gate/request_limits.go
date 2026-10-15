@@ -13,8 +13,22 @@ import (
 // struct fields case-insensitively; pydantic is case-sensitive).
 var controlKeys = map[string]bool{
 	"model": true, "max_tokens": true, "max_completion_tokens": true,
-	"max_output_tokens": true, "stream": true, "stream_options": true,
-	"chat_template": true, "n": true, "best_of": true,
+	"max_output_tokens": true, "max_new_tokens": true, "stream": true,
+	"stream_options": true, "chat_template": true, "n": true, "best_of": true,
+	"parallel_sample_num": true, "logprobs": true, "top_logprobs": true,
+	"top_logprobs_num": true, "top_k": true, "min_tokens": true,
+	"min_new_tokens": true, "stop_token_ids": true, "token_ids_logprob": true,
+	"input_ids": true, "return_hidden_states": true, "return_routed_experts": true,
+	"routed_experts_start_len": true, "return_cached_tokens_details": true,
+	"return_spec_tokens_details": true, "return_prompt_token_ids": true,
+	"return_token_ids": true, "return_meta_info": true,
+	"return_input_ids_in_sglext": true, "return_output_ids_in_sglext": true,
+	"return_sampling_mask": true, "sampling_logprobs_mode": true,
+	"return_flat_raw_output_top_logprobs": true,
+	"return_flat_raw_top_logprobs_b64":    true, "lora_path": true,
+	"custom_logit_processor": true, "priority": true, "routed_dp_rank": true,
+	"data_parallel_rank": true, "bootstrap_host": true, "bootstrap_port": true,
+	"bootstrap_room": true, "disagg_prefill_dp_rank": true,
 }
 
 // fanoutKeys multiply generation server-side: n parallel completions (or
@@ -25,11 +39,77 @@ var controlKeys = map[string]bool{
 // single-sequence only.
 var fanoutKeys = []string{"n", "best_of"}
 
-// limitKeys are every completion-limit spelling the upstream honors. The gate
-// must bind the maximum of all of them: binding only max_tokens while the
-// model obeys max_completion_tokens/max_output_tokens underbills by that
-// multiple (R25-BILLCAP-001 OUTPUT cases).
-var limitKeys = []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+// completionLimitKeys are endpoint-specific. Treating every spelling as
+// interchangeable is unsafe: SGLang ignores a Chat-only key on Responses (or
+// a Responses-only key on Chat), while the old gate would still bind the
+// ignored small value into the entitlement. That made a default-length model
+// completion appear metered as a one-token request.
+var completionLimitKeys = map[string][]string{
+	"/v1/chat/completions": {"max_tokens", "max_completion_tokens"},
+	"/v1/responses":        {"max_output_tokens"},
+}
+
+var allCompletionLimitKeys = map[string]bool{
+	"max_tokens": true, "max_completion_tokens": true, "max_output_tokens": true,
+}
+
+const (
+	// OpenAI specifies a maximum of 20 alternatives per generated token. This
+	// deliberately stays below the model vocabulary and bounds both scheduler
+	// work and response amplification.
+	maxTopLogprobs = 20
+	// top_k=-1 disables top-k sampling in SGLang. A fixed positive ceiling
+	// avoids an attacker turning each generated token into an unbounded top-k
+	// operation while still allowing useful non-default sampling.
+	maxTopK = 1024
+)
+
+// unsafeConfidentialKeys are native/compatibility controls that must never
+// reach confidential SGLang. They either bypass normal text tokenization or
+// reach token-id operations without a vocabulary bound. The native endpoints
+// are already fenced; this closes equivalent fields accepted by the OpenAI
+// chat surface on different SGLang releases.
+var unsafeConfidentialKeys = map[string]string{
+	"input_ids":           "input_ids is not supported on this endpoint",
+	"stop_token_ids":      "stop_token_ids is not supported on this endpoint",
+	"token_ids_logprob":   "token_ids_logprob is not supported on this endpoint",
+	"top_logprobs_num":    "top_logprobs_num is not supported on this endpoint",
+	"min_new_tokens":      "min_new_tokens is not supported on this endpoint",
+	"parallel_sample_num": "parallel_sample_num is not supported on this endpoint",
+	"max_new_tokens":      "max_new_tokens is not supported on this endpoint",
+
+	// SGLang debug/result-expansion controls can return tensors, token-id
+	// vectors, and routing internals that are neither part of the OpenAI
+	// contract nor covered by token metering. Confidential endpoints expose
+	// ordinary text, reasoning, and tool-call responses only.
+	"return_hidden_states":                "debug tensor output is not supported on this endpoint",
+	"return_routed_experts":               "debug routing output is not supported on this endpoint",
+	"routed_experts_start_len":            "debug routing controls are not supported on this endpoint",
+	"return_cached_tokens_details":        "debug cache output is not supported on this endpoint",
+	"return_spec_tokens_details":          "debug speculation output is not supported on this endpoint",
+	"return_prompt_token_ids":             "debug token-id output is not supported on this endpoint",
+	"return_token_ids":                    "debug token-id output is not supported on this endpoint",
+	"return_meta_info":                    "debug metadata output is not supported on this endpoint",
+	"return_input_ids_in_sglext":          "debug token-id output is not supported on this endpoint",
+	"return_output_ids_in_sglext":         "debug token-id output is not supported on this endpoint",
+	"return_sampling_mask":                "debug sampling output is not supported on this endpoint",
+	"sampling_logprobs_mode":              "debug logprob output is not supported on this endpoint",
+	"return_flat_raw_output_top_logprobs": "debug logprob output is not supported on this endpoint",
+	"return_flat_raw_top_logprobs_b64":    "debug logprob output is not supported on this endpoint",
+
+	// These extensions select runtime-controlled resources or a queue/routing
+	// lane. Public callers must not select an adapter, custom processor, or a
+	// particular worker/priority; the attested deployment owns those choices.
+	"lora_path":              "dynamic adapter selection is not supported on this endpoint",
+	"custom_logit_processor": "custom logit processors are not supported on this endpoint",
+	"priority":               "request priority is not supported on this endpoint",
+	"routed_dp_rank":         "internal routing controls are not supported on this endpoint",
+	"data_parallel_rank":     "internal routing controls are not supported on this endpoint",
+	"bootstrap_host":         "internal routing controls are not supported on this endpoint",
+	"bootstrap_port":         "internal routing controls are not supported on this endpoint",
+	"bootstrap_room":         "internal routing controls are not supported on this endpoint",
+	"disagg_prefill_dp_rank": "internal routing controls are not supported on this endpoint",
+}
 
 // rejectDuplicateKeys scans the top level of a JSON object and refuses any
 // exact duplicate key, any case-variant duplicate of a control key, and the
@@ -77,9 +157,9 @@ func rejectDuplicateKeys(body []byte) error {
 
 // parseRequestLimits extracts the model id and the effective output bound.
 // Confidential mode parses strictly (duplicate/case-variant keys rejected,
-// all completion-limit spellings bound, chat_template refused); legacy mode
-// keeps the historical lenient parse for compatibility.
-func parseRequestLimits(confidential bool, body []byte) (model string, maxOut int, err error) {
+// endpoint-specific completion-limit spellings bound, chat_template refused);
+// legacy mode keeps the historical lenient parse for compatibility.
+func parseRequestLimits(confidential bool, requestPath string, body []byte) (model string, maxOut int, err error) {
 	if !confidential {
 		var parsed struct {
 			Model     string `json:"model"`
@@ -113,6 +193,20 @@ func parseRequestLimits(confidential bool, body []byte) (model string, maxOut in
 	if raw, ok := doc["model"]; ok {
 		_ = json.Unmarshal(raw, &model) // non-string → empty model
 	}
+	limitKeys, ok := completionLimitKeys[requestPath]
+	if !ok {
+		return "", 0, fmt.Errorf("unsupported confidential inference path %q", requestPath)
+	}
+	allowedLimits := make(map[string]bool, len(limitKeys))
+	for _, k := range limitKeys {
+		allowedLimits[k] = true
+	}
+	for k := range allCompletionLimitKeys {
+		if _, present := doc[k]; present && !allowedLimits[k] {
+			return "", 0, fmt.Errorf("%s is not supported on %s", k, requestPath)
+		}
+	}
+
 	maxOut = -1
 	for _, k := range limitKeys {
 		raw, ok := doc[k]
@@ -148,5 +242,65 @@ func parseRequestLimits(confidential bool, body []byte) (model string, maxOut in
 			return "", 0, fmt.Errorf("%s > 1 is not supported on this endpoint (parallel generations are not metered per-request)", k)
 		}
 	}
+	if err := validateSamplingControls(doc, maxOut); err != nil {
+		return "", 0, err
+	}
 	return model, maxOut, nil
+}
+
+// validateSamplingControls constrains the SGLang controls whose accepted
+// range is broader than the OpenAI chat contract. In particular, older and
+// current SGLang releases have accepted values that can reach topk/scatter
+// tensor operations without a vocabulary bound. Keep the check at the proxy
+// boundary, rather than relying on the image version, so future image changes
+// cannot reopen this availability boundary.
+func validateSamplingControls(doc map[string]json.RawMessage, maxOut int) error {
+	for key, message := range unsafeConfidentialKeys {
+		if _, ok := doc[key]; ok {
+			return errors.New(message)
+		}
+	}
+
+	if raw, ok := doc["logprobs"]; ok {
+		value := bytes.TrimSpace(raw)
+		if !bytes.Equal(value, []byte("true")) && !bytes.Equal(value, []byte("false")) {
+			return errors.New("logprobs must be a boolean")
+		}
+	}
+	if raw, ok := doc["top_logprobs"]; ok {
+		value, err := parseControlInt(raw, "top_logprobs")
+		if err != nil || value < 0 || value > maxTopLogprobs {
+			return fmt.Errorf("top_logprobs must be an integer from 0 to %d", maxTopLogprobs)
+		}
+	}
+	if raw, ok := doc["top_k"]; ok {
+		value, err := parseControlInt(raw, "top_k")
+		if err != nil || value == 0 || value < -1 || value > maxTopK {
+			return fmt.Errorf("top_k must be -1 or an integer from 1 to %d", maxTopK)
+		}
+	}
+	if raw, ok := doc["min_tokens"]; ok {
+		value, err := parseControlInt(raw, "min_tokens")
+		if err != nil || value < 0 {
+			return errors.New("min_tokens must be a non-negative integer")
+		}
+		// A positive minimum must fit the effective output limit that is bound
+		// into the one-use entitlement. parseRequestLimits returns -1 when the
+		// request has no bound; the gate will reject that request separately.
+		if maxOut > 0 && value > maxOut {
+			return errors.New("min_tokens must not exceed the requested output limit")
+		}
+	}
+	return nil
+}
+
+func parseControlInt(raw json.RawMessage, field string) (int, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, fmt.Errorf("%s must be an integer", field)
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, fmt.Errorf("%s must be an integer", field)
+	}
+	return value, nil
 }
