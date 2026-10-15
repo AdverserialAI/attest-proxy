@@ -549,3 +549,9 @@ chmod 600 "$HOME/.config/adverserial/ehbp-identity"
 Copy the single file value into sealed `EHBP_IDENTITY_B64`; never commit or
 print it. The proxy publishes only its RFC 9458 public key configuration in
 fresh quote-bound evidence.
+
+## License
+
+This repository is source-available proprietary software owned by Adverserial
+AI LLC. See [`LICENSE`](./LICENSE) and [`LICENSING.md`](./LICENSING.md).
+Third-party components retain their own terms.
