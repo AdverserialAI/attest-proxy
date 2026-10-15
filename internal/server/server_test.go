@@ -680,3 +680,32 @@ func TestAttestationRateBucketShedsAndRecovers(t *testing.T) {
 		t.Fatal("bucket must refill after the burst")
 	}
 }
+
+// rc.24: malformed nonces fail with 400 WITHOUT consuming the shared rate
+// budget — a flood of invalid requests must never hold legitimate verifiers
+// at 429 (bucket ordering matters).
+func TestAttestationInvalidNonceDoesNotConsumeBudget(t *testing.T) {
+	b := newRateBucket(4, 0) // no refill: any leak is observable
+	s, ts := newTestServer(t, testConfig())
+	_ = s
+	s.attestationRate = b
+	for i := 0; i < 10; i++ {
+		resp, err := http.Get(ts.URL + "/attestation?nonce=!!bad!!")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("bad nonce -> %d, want 400", resp.StatusCode)
+		}
+	}
+	// the full burst budget survived the malformed flood
+	for i := 0; i < 4; i++ {
+		if !b.allow() {
+			t.Fatalf("valid-nonce token %d was leaked by malformed requests", i)
+		}
+	}
+	if b.allow() {
+		t.Fatal("budget should be empty after the 4 valid tokens")
+	}
+}

@@ -466,15 +466,20 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !s.attestationRate.allow() {
-		w.Header().Set("Retry-After", "2")
-		writeError(w, http.StatusTooManyRequests, "attestation rate limited; retry shortly")
-		return
-	}
-
+	// Validate the nonce BEFORE the rate bucket: a malformed request is cheap
+	// (no quote work) and must never consume the shared budget — otherwise a
+	// flood of invalid nonces could hold every legitimate verifier at 429.
+	// Per-client buckets would need a trustworthy source identity, which the
+	// network topology does not provide (the edge peer is the ingress, and
+	// forwarding headers are attacker-controlled), so the bucket stays global.
 	nonceRaw, nonceParam, err := decodeNonce(r.URL.Query())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.attestationRate.allow() {
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusTooManyRequests, "attestation rate limited; retry shortly")
 		return
 	}
 
