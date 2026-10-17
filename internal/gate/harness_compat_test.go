@@ -3,6 +3,7 @@ package gate
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,27 @@ func TestHarnessCompatAdmission(t *testing.T) {
 			t.Errorf("upstream body lacks injected include_usage: %s", echo)
 		}
 	})
+
+	// The exact toolset kimi-code 2.x sends on every turn: 26 built-in tools
+	// whose schemas serialize to ~77 KB — captured from a live kimi-code
+	// request (testdata/kimi_code_tools.json). rc.26's 64 KB tools byte cap
+	// rejected every real kimi-code turn; pin the genuine payload so the cap
+	// can never silently drop below harness reality again.
+	t.Run("kimi-code captured 26-tool payload admitted", func(t *testing.T) {
+		tools, err := os.ReadFile("testdata/kimi_code_tools.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := `{"model":"lordx64/cyberglm","max_tokens":4096,"stream":true,` +
+			`"stream_options":{"include_usage":true},"reasoning_effort":"max","prompt_cache_key":"sess-1",` +
+			`"messages":[{"role":"system","content":[{"type":"text","text":"You are Kimi Code."}]},` +
+			`{"role":"user","content":[{"type":"text","text":"say ok"}]}],"tools":` + string(tools) + `}`
+		token := signedEntitlement(t, private, "billing", harnessClaims("harness-kimi-tools", now))
+		rec := postChat(t, h, token, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("captured kimi-code payload rejected: status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 // TestHarnessCompatRejects pins the unsafe shapes that must stay rejected
@@ -214,6 +236,8 @@ func TestHarnessCompatRejects(t *testing.T) {
 			`{"model":"lordx64/cyberglm","max_tokens":8,"messages":[{"role":"function","content":"hi"}]}`},
 		{"responses input over 512 items", "/v1/responses",
 			`{"model":"lordx64/cyberglm","max_output_tokens":8,"input":[` + strings.Repeat(`{"type":"message","role":"user","content":"x"},`, 512) + `{"type":"message","role":"user","content":"x"}]}`},
+		{"tools over 256KB", "/v1/chat/completions",
+			`{"model":"lordx64/cyberglm","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","description":"` + strings.Repeat("y", 257<<10) + `"}}]}`},
 		{"responses null input", "/v1/responses",
 			`{"model":"lordx64/cyberglm","max_output_tokens":8,"input":null}`},
 	}

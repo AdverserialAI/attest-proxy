@@ -451,9 +451,15 @@ const (
 	maxStopSequences       = 8
 	maxStopBytes           = 4 << 10
 	maxTools               = 64
-	maxToolsBytes          = 64 << 10
-	maxToolChoiceBytes     = 4 << 10
-	maxToolJSONDepth       = 20
+	// The byte cap must fit the supported harnesses' real toolsets: kimi-code
+	// ships 26 built-in tools whose schemas serialize to ~77 KB (measured from
+	// a captured live request), and MCP-heavy setups go higher. 256 KB covers
+	// them with headroom while the count and nesting caps keep the actual
+	// engine-stress class (pathological grammar compilation) closed; plain
+	// bytes are already bounded by the 8 MiB request cap.
+	maxToolsBytes      = 256 << 10
+	maxToolChoiceBytes = 4 << 10
+	maxToolJSONDepth   = 20
 )
 
 // validatePayloadBounds caps every request field that can grow engine work
