@@ -176,12 +176,17 @@ func TestPayloadBoundsRC26(t *testing.T) {
 	reject := []struct{ name, body string }{
 		{"ebnf rejected", `{"model":"m/x","max_tokens":8,"ebnf":"root ::= 'a'"}`},
 		{"guided_grammar rejected", `{"model":"m/x","max_tokens":8,"guided_grammar":"x"}`},
+		{"regex rejected", `{"model":"m/x","max_tokens":8,"regex":".*"}`},
+		{"json schema rejected", `{"model":"m/x","max_tokens":8,"response_format":{"type":"json_schema","json_schema":{"name":"x"}}}`},
 		{"sampling_params passthrough rejected", `{"model":"m/x","max_tokens":8,"sampling_params":{"top_k":1}}`},
 		{"huge logit_bias", `{"model":"m/x","max_tokens":8,"logit_bias":{` + bigBias(150) + `}}`},
 		{"logit_bias bad value", `{"model":"m/x","max_tokens":8,"logit_bias":{"12":999}}`},
 		{"logit_bias bad token id", `{"model":"m/x","max_tokens":8,"logit_bias":{"notanum":1}}`},
+		{"logit_bias trailing text", `{"model":"m/x","max_tokens":8,"logit_bias":{"12junk":1}}`},
 		{"stop flood", `{"model":"m/x","max_tokens":8,"stop":["a","b","c","d","e","f","g","h","i"]}`},
 		{"tools flood", `{"model":"m/x","max_tokens":8,"tools":` + bigTools(65) + `}`},
+		{"tool choice invalid", `{"model":"m/x","max_tokens":8,"tool_choice":"all"}`},
+		{"tool choice deep nesting", `{"model":"m/x","max_tokens":8,"tool_choice":` + nestedJSON(22) + `}`},
 	}
 	for _, tc := range reject {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,6 +200,8 @@ func TestPayloadBoundsRC26(t *testing.T) {
 		{"small logit_bias", `{"model":"m/x","max_tokens":8,"logit_bias":{"12":-10,"34":5}}`},
 		{"few stops", `{"model":"m/x","max_tokens":8,"stop":["END","DONE"]}`},
 		{"one tool", `{"model":"m/x","max_tokens":8,"tools":[{"type":"function","function":{"name":"f"}}]}`},
+		{"auto tool choice", `{"model":"m/x","max_tokens":8,"tool_choice":"auto"}`},
+		{"named function tool choice", `{"model":"m/x","max_tokens":8,"tool_choice":{"type":"function","function":{"name":"f"}}}`},
 	}
 	for _, tc := range allow {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,4 +226,8 @@ func bigTools(n int) string {
 		parts = append(parts, `{"type":"function","function":{"name":"f"}}`)
 	}
 	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func nestedJSON(depth int) string {
+	return strings.Repeat(`{"x":`, depth) + `0` + strings.Repeat(`}`, depth)
 }

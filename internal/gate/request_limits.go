@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -318,30 +319,34 @@ func parseControlInt(raw json.RawMessage, field string) (int, error) {
 // map (per-token hot path + memory spike), a stop-sequence flood, or a huge
 // tools array can each destabilize the SGLang engine from a single request.
 const (
-	maxLogitBiasEntries = 100
-	maxLogitBiasAbs     = 100.0
-	maxLogitBiasTokenID = 1 << 22
-	maxGrammarBytes     = 64 << 10
-	maxStopSequences    = 8
-	maxStopBytes        = 4 << 10
-	maxTools            = 64
-	maxToolsBytes       = 256 << 10
+	maxLogitBiasEntries    = 100
+	maxLogitBiasAbs        = 100.0
+	maxLogitBiasTokenID    = 200_000
+	maxResponseFormatBytes = 4 << 10
+	maxStopSequences       = 8
+	maxStopBytes           = 4 << 10
+	maxTools               = 64
+	maxToolsBytes          = 64 << 10
+	maxToolChoiceBytes     = 4 << 10
+	maxToolJSONDepth       = 20
 )
 
 // validatePayloadBounds caps every request field that can grow engine work
 // independently of the token-metered path.
 func validatePayloadBounds(doc map[string]json.RawMessage) error {
-	// Grammar / structured-output: EBNF and free grammars are the most
-	// explosive compiler inputs — rejected outright. JSON schema / regex are
-	// allowed but size-capped.
-	for _, k := range []string{"ebnf", "guided_grammar"} {
+	// Grammar compilation lives inside the inference engine. A byte cap alone
+	// does not prevent a compact but pathological schema or regex from tying up
+	// that engine, so confidential inference accepts only OpenAI's simple JSON
+	// object mode. The other grammar surfaces stay unavailable until they have
+	// an isolated resource budget and load coverage.
+	for _, k := range []string{"ebnf", "guided_grammar", "regex", "json_schema", "guided_json", "guided_regex"} {
 		if _, ok := doc[k]; ok {
 			return fmt.Errorf("%s is not supported on this endpoint", k)
 		}
 	}
-	for _, k := range []string{"response_format", "regex", "json_schema", "guided_json", "guided_regex"} {
-		if raw, ok := doc[k]; ok && len(raw) > maxGrammarBytes {
-			return fmt.Errorf("%s exceeds the %dKB limit", k, maxGrammarBytes>>10)
+	if raw, ok := doc["response_format"]; ok {
+		if err := validateResponseFormat(raw); err != nil {
+			return err
 		}
 	}
 	// sampling_params is a native passthrough that could smuggle unchecked
@@ -358,8 +363,8 @@ func validatePayloadBounds(doc map[string]json.RawMessage) error {
 			return fmt.Errorf("logit_bias exceeds the %d-entry limit", maxLogitBiasEntries)
 		}
 		for k, v := range m {
-			var id int
-			if _, err := fmt.Sscanf(k, "%d", &id); err != nil || id < 0 || id >= maxLogitBiasTokenID {
+			id, err := strconv.ParseInt(k, 10, 32)
+			if err != nil || id < 0 || id >= maxLogitBiasTokenID {
 				return fmt.Errorf("logit_bias key %q is not a valid token id", k)
 			}
 			if v > maxLogitBiasAbs || v < -maxLogitBiasAbs {
@@ -388,6 +393,12 @@ func validatePayloadBounds(doc map[string]json.RawMessage) error {
 		}
 	}
 	if raw, ok := doc["tools"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if len(raw) > maxToolsBytes {
+			return fmt.Errorf("tools exceed the %dKB limit", maxToolsBytes>>10)
+		}
+		if !jsonDepthAtMost(raw, maxToolJSONDepth) {
+			return fmt.Errorf("tools exceed the %d-level nesting limit", maxToolJSONDepth)
+		}
 		var tools []json.RawMessage
 		if err := json.Unmarshal(raw, &tools); err != nil {
 			return fmt.Errorf("tools must be an array")
@@ -395,9 +406,91 @@ func validatePayloadBounds(doc map[string]json.RawMessage) error {
 		if len(tools) > maxTools {
 			return fmt.Errorf("tools exceeds the %d-tool limit", maxTools)
 		}
-		if len(raw) > maxToolsBytes {
-			return fmt.Errorf("tools exceed the %dKB limit", maxToolsBytes>>10)
+	}
+	if raw, ok := doc["tool_choice"]; ok {
+		if err := validateToolChoice(raw); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func validateResponseFormat(raw json.RawMessage) error {
+	if len(raw) > maxResponseFormatBytes {
+		return fmt.Errorf("response_format exceeds the %dKB limit", maxResponseFormatBytes>>10)
+	}
+	var format map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &format); err != nil {
+		return errors.New("response_format must be an object")
+	}
+	typeRaw, ok := format["type"]
+	if !ok || len(format) != 1 {
+		return errors.New("response_format may contain only type")
+	}
+	var kind string
+	if err := json.Unmarshal(typeRaw, &kind); err != nil || kind != "json_object" {
+		return errors.New("only response_format type json_object is supported on this endpoint")
+	}
+	return nil
+}
+
+func validateToolChoice(raw json.RawMessage) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	if len(raw) > maxToolChoiceBytes || !jsonDepthAtMost(raw, maxToolJSONDepth) {
+		return errors.New("tool_choice exceeds confidential endpoint limits")
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if text == "auto" || text == "none" || text == "required" {
+			return nil
+		}
+		return errors.New("tool_choice string must be auto, none, or required")
+	}
+	var choice map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &choice); err != nil || len(choice) != 2 {
+		return errors.New("tool_choice must be a supported string or function selector")
+	}
+	var kind string
+	var function map[string]json.RawMessage
+	if err := json.Unmarshal(choice["type"], &kind); err != nil || kind != "function" || json.Unmarshal(choice["function"], &function) != nil || len(function) != 1 {
+		return errors.New("tool_choice must select one named function")
+	}
+	var name string
+	if err := json.Unmarshal(function["name"], &name); err != nil || name == "" || len(name) > 128 {
+		return errors.New("tool_choice function name is invalid")
+	}
+	return nil
+}
+
+// jsonDepthAtMost is a byte-level preflight so deeply nested tool schemas do
+// not reach a JSON decoder or the upstream runtime with unbounded recursion.
+func jsonDepthAtMost(raw []byte, maximum int) bool {
+	depth := 0
+	inString, escaped := false, false
+	for _, b := range raw {
+		if inString {
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > maximum {
+				return false
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return depth == 0 && !inString
 }
