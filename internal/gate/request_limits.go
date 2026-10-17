@@ -67,8 +67,14 @@ const (
 	// Chat templates add control tokens for each message and tool call. Bound
 	// cardinality as well as bytes so a compact JSON body cannot expand into an
 	// disproportionately large model prompt after the entitlement is checked.
-	maxConversationItems   = 64
-	maxToolCallsPerMessage = 16
+	// The ceiling must fit real agentic harness sessions: kimi-code, claude-code,
+	// codex, and opencode carry the full message history on every turn, which
+	// reaches a few hundred messages in ordinary use. The 8 MiB body cap remains
+	// the real memory bound; this bound only prevents degenerate
+	// many-tiny-messages expansion.
+	maxConversationItems      = 512
+	maxToolCallsPerMessage    = 16
+	maxContentPartsPerMessage = 32
 	// OpenAI specifies a maximum of 20 alternatives per generated token. This
 	// deliberately stays below the model vocabulary and bounds both scheduler
 	// work and response amplification.
@@ -322,10 +328,9 @@ func validateConversationLimits(requestPath string, doc map[string]json.RawMessa
 		default:
 			return fmt.Errorf("message role %q is not supported on this endpoint", role)
 		}
-		if content, present := message["content"]; present && !bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
-			var text string
-			if err := json.Unmarshal(content, &text); err != nil {
-				return errors.New("message content must be text; media content is not supported on this endpoint")
+		if content, present := message["content"]; present {
+			if err := validateMessageContent(content); err != nil {
+				return err
 			}
 		}
 		if calls, present := message["tool_calls"]; present {
@@ -333,6 +338,45 @@ func validateConversationLimits(requestPath string, doc map[string]json.RawMessa
 			if err := json.Unmarshal(calls, &toolCalls); err != nil || len(toolCalls) > maxToolCallsPerMessage {
 				return fmt.Errorf("message tool_calls must be an array of at most %d items", maxToolCallsPerMessage)
 			}
+		}
+	}
+	return nil
+}
+
+// validateMessageContent accepts the text shapes the supported SDK gateways
+// emit: a plain string, null, or an array of text content parts
+// ([{"type":"text","text":"..."}] — the shape kimi-code, claude-code, codex,
+// and opencode send for nearly every message). Parts of any other type carry
+// remote media references that make the model runtime fetch or expand data
+// outside the entitlement's byte-bound prompt, and vision is unsupported on
+// this deployment, so they stay rejected.
+func validateMessageContent(raw json.RawMessage) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return nil
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return errors.New("message content must be text; media content is not supported on this endpoint")
+	}
+	if len(parts) > maxContentPartsPerMessage {
+		return fmt.Errorf("message content exceeds the %d-part limit", maxContentPartsPerMessage)
+	}
+	for _, rawPart := range parts {
+		var part map[string]json.RawMessage
+		if err := json.Unmarshal(rawPart, &part); err != nil {
+			return errors.New("message content parts must be objects")
+		}
+		var kind string
+		if err := json.Unmarshal(part["type"], &kind); err != nil || kind != "text" {
+			return errors.New("only text content parts are supported on this endpoint; media content is not supported")
+		}
+		var partText string
+		if err := json.Unmarshal(part["text"], &partText); err != nil {
+			return errors.New("text content parts must carry a text string")
 		}
 	}
 	return nil
