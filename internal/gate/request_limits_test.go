@@ -2,6 +2,7 @@ package gate
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -169,4 +170,53 @@ func TestFanoutMultiplicityRejected(t *testing.T) {
 			t.Errorf("must accept %s: %v", body, err)
 		}
 	}
+}
+
+func TestPayloadBoundsRC26(t *testing.T) {
+	reject := []struct{ name, body string }{
+		{"ebnf rejected", `{"model":"m/x","max_tokens":8,"ebnf":"root ::= 'a'"}`},
+		{"guided_grammar rejected", `{"model":"m/x","max_tokens":8,"guided_grammar":"x"}`},
+		{"sampling_params passthrough rejected", `{"model":"m/x","max_tokens":8,"sampling_params":{"top_k":1}}`},
+		{"huge logit_bias", `{"model":"m/x","max_tokens":8,"logit_bias":{` + bigBias(150) + `}}`},
+		{"logit_bias bad value", `{"model":"m/x","max_tokens":8,"logit_bias":{"12":999}}`},
+		{"logit_bias bad token id", `{"model":"m/x","max_tokens":8,"logit_bias":{"notanum":1}}`},
+		{"stop flood", `{"model":"m/x","max_tokens":8,"stop":["a","b","c","d","e","f","g","h","i"]}`},
+		{"tools flood", `{"model":"m/x","max_tokens":8,"tools":` + bigTools(65) + `}`},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := parseRequestLimits(true, "/v1/chat/completions", []byte(tc.body)); err == nil {
+				t.Errorf("must reject: %s", tc.body[:min(60, len(tc.body))])
+			}
+		})
+	}
+	allow := []struct{ name, body string }{
+		{"json_object mode", `{"model":"m/x","max_tokens":8,"response_format":{"type":"json_object"}}`},
+		{"small logit_bias", `{"model":"m/x","max_tokens":8,"logit_bias":{"12":-10,"34":5}}`},
+		{"few stops", `{"model":"m/x","max_tokens":8,"stop":["END","DONE"]}`},
+		{"one tool", `{"model":"m/x","max_tokens":8,"tools":[{"type":"function","function":{"name":"f"}}]}`},
+	}
+	for _, tc := range allow {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := parseRequestLimits(true, "/v1/chat/completions", []byte(tc.body)); err != nil {
+				t.Errorf("must accept %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func bigBias(n int) string {
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, `"`+string(rune('0'+i%10))+`x`+strings.Repeat("1", i/10)+`":1`)
+	}
+	return strings.Join(parts, ",")
+}
+
+func bigTools(n int) string {
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, `{"type":"function","function":{"name":"f"}}`)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }

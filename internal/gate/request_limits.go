@@ -29,6 +29,11 @@ var controlKeys = map[string]bool{
 	"custom_logit_processor": true, "priority": true, "routed_dp_rank": true,
 	"data_parallel_rank": true, "bootstrap_host": true, "bootstrap_port": true,
 	"bootstrap_room": true, "disagg_prefill_dp_rank": true,
+	// rc.26: the remaining engine-stress payload classes
+	"logit_bias": true, "response_format": true, "regex": true, "ebnf": true,
+	"json_schema": true, "guided_json": true, "guided_regex": true,
+	"guided_grammar": true, "stop": true, "tools": true, "tool_choice": true,
+	"sampling_params": true,
 }
 
 // fanoutKeys multiply generation server-side: n parallel completions (or
@@ -245,6 +250,9 @@ func parseRequestLimits(confidential bool, requestPath string, body []byte) (mod
 	if err := validateSamplingControls(doc, maxOut); err != nil {
 		return "", 0, err
 	}
+	if err := validatePayloadBounds(doc); err != nil {
+		return "", 0, err
+	}
 	return model, maxOut, nil
 }
 
@@ -303,4 +311,93 @@ func parseControlInt(raw json.RawMessage, field string) (int, error) {
 		return 0, fmt.Errorf("%s must be an integer", field)
 	}
 	return value, nil
+}
+
+// rc.26 payload bounds: the remaining engine-stress classes. A pathological
+// grammar (xgrammar compile explosion hangs the scheduler), a giant logit_bias
+// map (per-token hot path + memory spike), a stop-sequence flood, or a huge
+// tools array can each destabilize the SGLang engine from a single request.
+const (
+	maxLogitBiasEntries = 100
+	maxLogitBiasAbs     = 100.0
+	maxLogitBiasTokenID = 1 << 22
+	maxGrammarBytes     = 64 << 10
+	maxStopSequences    = 8
+	maxStopBytes        = 4 << 10
+	maxTools            = 64
+	maxToolsBytes       = 256 << 10
+)
+
+// validatePayloadBounds caps every request field that can grow engine work
+// independently of the token-metered path.
+func validatePayloadBounds(doc map[string]json.RawMessage) error {
+	// Grammar / structured-output: EBNF and free grammars are the most
+	// explosive compiler inputs — rejected outright. JSON schema / regex are
+	// allowed but size-capped.
+	for _, k := range []string{"ebnf", "guided_grammar"} {
+		if _, ok := doc[k]; ok {
+			return fmt.Errorf("%s is not supported on this endpoint", k)
+		}
+	}
+	for _, k := range []string{"response_format", "regex", "json_schema", "guided_json", "guided_regex"} {
+		if raw, ok := doc[k]; ok && len(raw) > maxGrammarBytes {
+			return fmt.Errorf("%s exceeds the %dKB limit", k, maxGrammarBytes>>10)
+		}
+	}
+	// sampling_params is a native passthrough that could smuggle unchecked
+	// fields past every top-level control above.
+	if _, ok := doc["sampling_params"]; ok {
+		return fmt.Errorf("sampling_params is not supported on this endpoint")
+	}
+	if raw, ok := doc["logit_bias"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var m map[string]float64
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return fmt.Errorf("logit_bias must be an object of token-id to bias")
+		}
+		if len(m) > maxLogitBiasEntries {
+			return fmt.Errorf("logit_bias exceeds the %d-entry limit", maxLogitBiasEntries)
+		}
+		for k, v := range m {
+			var id int
+			if _, err := fmt.Sscanf(k, "%d", &id); err != nil || id < 0 || id >= maxLogitBiasTokenID {
+				return fmt.Errorf("logit_bias key %q is not a valid token id", k)
+			}
+			if v > maxLogitBiasAbs || v < -maxLogitBiasAbs {
+				return fmt.Errorf("logit_bias value out of range")
+			}
+		}
+	}
+	if raw, ok := doc["stop"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var stops []string
+		var single string
+		if err := json.Unmarshal(raw, &stops); err != nil {
+			if err := json.Unmarshal(raw, &single); err != nil {
+				return fmt.Errorf("stop must be a string or an array of strings")
+			}
+			stops = []string{single}
+		}
+		if len(stops) > maxStopSequences {
+			return fmt.Errorf("stop exceeds the %d-sequence limit", maxStopSequences)
+		}
+		total := 0
+		for _, s := range stops {
+			total += len(s)
+		}
+		if total > maxStopBytes {
+			return fmt.Errorf("stop sequences exceed the %dKB total limit", maxStopBytes>>10)
+		}
+	}
+	if raw, ok := doc["tools"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var tools []json.RawMessage
+		if err := json.Unmarshal(raw, &tools); err != nil {
+			return fmt.Errorf("tools must be an array")
+		}
+		if len(tools) > maxTools {
+			return fmt.Errorf("tools exceeds the %d-tool limit", maxTools)
+		}
+		if len(raw) > maxToolsBytes {
+			return fmt.Errorf("tools exceed the %dKB limit", maxToolsBytes>>10)
+		}
+	}
+	return nil
 }
