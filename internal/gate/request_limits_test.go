@@ -49,6 +49,39 @@ func TestParseRequestLimitsConfidentialStrict(t *testing.T) {
 	}
 }
 
+func TestConfidentialConversationLimits(t *testing.T) {
+	valid := `{"model":"m/x","max_tokens":8,"messages":[{"role":"system","content":"rules"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`
+	if _, _, err := parseRequestLimits(true, "/v1/chat/completions", []byte(valid)); err != nil {
+		t.Fatalf("supported text and tool-call conversation rejected: %v", err)
+	}
+	tooMany := `{"model":"m/x","max_tokens":8,"messages":[` + strings.Repeat(`{"role":"user","content":"x"},`, maxConversationItems) + `{"role":"user","content":"x"}]}`
+	for name, body := range map[string]string{
+		"too many messages": tooMany,
+		"media content":     `{"model":"m/x","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/a"}}]}]}`,
+		"unknown role":      `{"model":"m/x","max_tokens":8,"messages":[{"role":"operator","content":"x"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := parseRequestLimits(true, "/v1/chat/completions", []byte(body)); err == nil {
+				t.Fatal("must reject unsafe conversation shape")
+			}
+		})
+	}
+}
+
+func TestConfidentialResponsesInputLimits(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"m/x","max_output_tokens":8,"input":"hello"}`,
+		`{"model":"m/x","max_output_tokens":8,"input":[{"role":"user","content":"hello"}]}`,
+	} {
+		if _, _, err := parseRequestLimits(true, "/v1/responses", []byte(body)); err != nil {
+			t.Errorf("must accept bounded responses input: %v", err)
+		}
+	}
+	if _, _, err := parseRequestLimits(true, "/v1/responses", []byte(`{"model":"m/x","max_output_tokens":8,"input":null}`)); err == nil {
+		t.Fatal("must reject null responses input")
+	}
+}
+
 func TestParseRequestLimitsUsesEndpointSpecificOutputLimits(t *testing.T) {
 	tests := []struct {
 		name string
@@ -146,6 +179,13 @@ func TestParseRequestLimitsLegacyLenient(t *testing.T) {
 	}
 	if model != "m/x" || maxOut != 64 {
 		t.Errorf("legacy parse = %q/%d, want m/x/64", model, maxOut)
+	}
+}
+
+func TestParseRequestLimitsRejectsDeeplyNestedJSON(t *testing.T) {
+	body := `{"model":"m/x","max_tokens":8,"messages":` + nestedJSON(maxRequestJSONDepth) + `}`
+	if _, _, err := parseRequestLimits(true, "/v1/chat/completions", []byte(body)); err == nil {
+		t.Fatal("must reject request JSON at the nesting limit once its wrapper is included")
 	}
 }
 

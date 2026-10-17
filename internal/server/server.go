@@ -34,6 +34,12 @@ import (
 // receiptTTL is the validity window of verification receipts (WP-3 freshness).
 const receiptTTL = 5 * time.Minute
 
+// maxAttestationQueryBytes caps parsing work on the public, nonce-only
+// verification route. A valid 64-byte nonce is well below this value; larger
+// queries cannot add any supported request semantics and must not make the
+// URL parser do repeated allocation work before rate limiting applies.
+const maxAttestationQueryBytes = 512
+
 // Server holds the runtime state of attest-proxy.
 type Server struct {
 	cfg    config.Config
@@ -472,6 +478,10 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	// Per-client buckets would need a trustworthy source identity, which the
 	// network topology does not provide (the edge peer is the ingress, and
 	// forwarding headers are attacker-controlled), so the bucket stays global.
+	if len(r.URL.RawQuery) > maxAttestationQueryBytes {
+		writeError(w, http.StatusBadRequest, "attestation query is too large")
+		return
+	}
 	nonceRaw, nonceParam, err := decodeNonce(r.URL.Query())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

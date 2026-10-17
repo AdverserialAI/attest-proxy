@@ -709,3 +709,28 @@ func TestAttestationInvalidNonceDoesNotConsumeBudget(t *testing.T) {
 		t.Fatal("budget should be empty after the 4 valid tokens")
 	}
 }
+
+// The public endpoint only supports a nonce. Reject an oversized raw query
+// before URL parsing and before touching the shared verification budget.
+func TestAttestationOversizedQueryDoesNotConsumeBudget(t *testing.T) {
+	b := newRateBucket(4, 0) // no refill: any leak is observable
+	s, ts := newTestServer(t, testConfig())
+	s.attestationRate = b
+	query := "nonce=" + b64Of(32) + "&padding=" + strings.Repeat("x", maxAttestationQueryBytes)
+	resp, err := http.Get(ts.URL + "/attestation?" + query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized query -> %d, want 400", resp.StatusCode)
+	}
+	for i := 0; i < 4; i++ {
+		if !b.allow() {
+			t.Fatalf("valid-nonce token %d was leaked by oversized query", i)
+		}
+	}
+	if b.allow() {
+		t.Fatal("budget should be empty after the 4 valid tokens")
+	}
+}

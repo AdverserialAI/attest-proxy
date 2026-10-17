@@ -60,6 +60,15 @@ var allCompletionLimitKeys = map[string]bool{
 }
 
 const (
+	// Bound nesting before decoding arbitrary request JSON. A request's raw
+	// body limit does not prevent a compact, deeply nested JSON value from
+	// imposing disproportionate parser or downstream validation work.
+	maxRequestJSONDepth = 32
+	// Chat templates add control tokens for each message and tool call. Bound
+	// cardinality as well as bytes so a compact JSON body cannot expand into an
+	// disproportionately large model prompt after the entitlement is checked.
+	maxConversationItems   = 64
+	maxToolCallsPerMessage = 16
 	// OpenAI specifies a maximum of 20 alternatives per generated token. This
 	// deliberately stays below the model vocabulary and bounds both scheduler
 	// work and response amplification.
@@ -182,6 +191,9 @@ func parseRequestLimits(confidential bool, requestPath string, body []byte) (mod
 	if err := rejectDuplicateKeys(body); err != nil {
 		return "", 0, err
 	}
+	if !jsonDepthAtMost(body, maxRequestJSONDepth) {
+		return "", 0, fmt.Errorf("request JSON exceeds the %d-level nesting limit", maxRequestJSONDepth)
+	}
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return "", 0, nil // malformed JSON → empty model, reported by the caller
@@ -251,10 +263,79 @@ func parseRequestLimits(confidential bool, requestPath string, body []byte) (mod
 	if err := validateSamplingControls(doc, maxOut); err != nil {
 		return "", 0, err
 	}
+	if err := validateConversationLimits(requestPath, doc); err != nil {
+		return "", 0, err
+	}
 	if err := validatePayloadBounds(doc); err != nil {
 		return "", 0, err
 	}
 	return model, maxOut, nil
+}
+
+// validateConversationLimits keeps confidential inference to the text-and-
+// tool-call shape emitted by the supported SDK gateways. In particular,
+// content-part arrays can carry remote media references that make the model
+// runtime fetch or expand data outside the entitlement's byte-bound prompt.
+func validateConversationLimits(requestPath string, doc map[string]json.RawMessage) error {
+	if requestPath == "/v1/responses" {
+		raw, ok := doc["input"]
+		if !ok {
+			// Upstream remains responsible for rejecting a semantically incomplete
+			// request. Do not turn the parser into a second API validator here.
+			return nil
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("input must not be null on /v1/responses")
+		}
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			return nil
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil || len(items) > maxConversationItems {
+			return fmt.Errorf("input must be text or an array of at most %d items", maxConversationItems)
+		}
+		return nil
+	}
+
+	raw, ok := doc["messages"]
+	if !ok {
+		// Upstream remains responsible for rejecting a semantically incomplete
+		// request. The gate only bounds fields that can expand model work.
+		return nil
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(raw, &messages); err != nil || len(messages) == 0 || len(messages) > maxConversationItems {
+		return fmt.Errorf("messages must be an array of 1 to %d items", maxConversationItems)
+	}
+	for _, rawMessage := range messages {
+		var message map[string]json.RawMessage
+		if err := json.Unmarshal(rawMessage, &message); err != nil {
+			return errors.New("each message must be an object")
+		}
+		var role string
+		if err := json.Unmarshal(message["role"], &role); err != nil {
+			return errors.New("each message must have a text role")
+		}
+		switch role {
+		case "system", "developer", "user", "assistant", "tool":
+		default:
+			return fmt.Errorf("message role %q is not supported on this endpoint", role)
+		}
+		if content, present := message["content"]; present && !bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
+			var text string
+			if err := json.Unmarshal(content, &text); err != nil {
+				return errors.New("message content must be text; media content is not supported on this endpoint")
+			}
+		}
+		if calls, present := message["tool_calls"]; present {
+			var toolCalls []json.RawMessage
+			if err := json.Unmarshal(calls, &toolCalls); err != nil || len(toolCalls) > maxToolCallsPerMessage {
+				return fmt.Errorf("message tool_calls must be an array of at most %d items", maxToolCallsPerMessage)
+			}
+		}
+	}
+	return nil
 }
 
 // validateSamplingControls constrains the SGLang controls whose accepted
