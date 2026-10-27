@@ -171,7 +171,7 @@ Evidence object (actual `DEV_MODE=1` output, keys as served):
 - `gpu_evidence_fresh_at` — the bundle's `generated_at`; clients apply their
   freshness policy to it.
 - `gpu_evidence_stale` — present and `true` when the bundle's `generated_at`
-  is older than 10 minutes (or missing). Stale evidence is still served for
+  is older than 30 minutes (or missing). Stale evidence is still served for
   availability; verifiers must fail freshness.
 - `dev` — present and `true` only in `DEV_MODE`. Production policy must
   reject any evidence carrying this flag.
@@ -190,7 +190,7 @@ one EAT JWT per GPU), writing atomically (tmp + fsync + rename):
 ```
 
 On failure the previous bundle is kept (never truncated); the proxy marks it
-stale once it ages past 10 minutes. The proxy re-stats the file at most once
+stale once it ages past 30 minutes. The proxy re-stats the file at most once
 per 30 s and re-reads only on mtime change. In the CVM compose the collector
 runs `--once` before the proxy boots (best-effort, `|| true`) and then loops
 in the background; the proxy container needs GPU visibility for it.
@@ -498,7 +498,7 @@ exists for client-integration development and is always marked `"dev": true`.
 - **KMS sealing** of the receipt signing key (and self-signed dev TLS key)
   via dstack `/GetKey` (WP-2/WP-4).
 - **GPU evidence freshness tightening**: the collector refreshes every 5 min
-  and the proxy flags staleness past 10 min; policy-side min-freshness
+  and the proxy flags staleness past 30 min; policy-side min-freshness
   enforcement and per-request GPU binding remain WP-3 exit-criteria work.
 - **Rate limiting** on the attestation endpoint.
 - Pin base-image digests in the Dockerfile for reproducible releases (WP-1).

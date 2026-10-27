@@ -86,7 +86,7 @@ func TestGPUBundleEmbedded(t *testing.T) {
 
 func TestGPUBundleStale(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gpu-evidence.json")
-	writeBundle(t, path, testNow.Add(-20*time.Minute).Format(time.RFC3339), "old")
+	writeBundle(t, path, testNow.Add(-31*time.Minute).Format(time.RFC3339), "old")
 
 	c, _ := newTestCache(path)
 	ev := c.Snapshot()
@@ -94,7 +94,7 @@ func TestGPUBundleStale(t *testing.T) {
 		t.Fatal("bundle not loaded")
 	}
 	if !ev.Stale {
-		t.Error("20-minute-old bundle must be marked stale")
+		t.Error("31-minute-old bundle must be marked stale")
 	}
 	built := BuildEvidence(EvidenceInput{GPU: ev})
 	if built["gpu_evidence_stale"] != true {

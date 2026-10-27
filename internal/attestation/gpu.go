@@ -17,7 +17,7 @@ type GPUBundleCache struct {
 
 	// ReloadInterval bounds stat() frequency (default 30s); StaleAfter is the
 	// staleness threshold measured from the bundle's generated_at (default
-	// 10min). Now is a test hook; production uses time.Now.
+	// 30min). Now is a test hook; production uses time.Now.
 	ReloadInterval time.Duration
 	StaleAfter     time.Duration
 	Now            func() time.Time
@@ -122,7 +122,11 @@ func (c *GPUBundleCache) staleAfter() time.Duration {
 	if c.StaleAfter > 0 {
 		return c.StaleAfter
 	}
-	return 10 * time.Minute
+	// The collector's effective refresh cadence is ~10-15 min (one NRAS round
+	// takes minutes for 8 GPUs), so a 10-min threshold flagged the evidence
+	// stale on every cycle. 30 min tolerates ~2 consecutive failed rounds
+	// while staying well under the 60-min EAT lifetime.
+	return 30 * time.Minute
 }
 
 func (c *GPUBundleCache) now() time.Time {

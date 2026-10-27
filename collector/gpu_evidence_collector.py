@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import secrets
+import signal
 import sys
 import tempfile
 import time
@@ -40,6 +41,10 @@ log = logging.getLogger("gpu-evidence-collector")
 NRAS_URL = os.environ.get("NRAS_URL", "https://nras.attestation.nvidia.com/v4/attest/gpu")
 DEFAULT_OUT = "/data/gpu-evidence.json"
 DEFAULT_INTERVAL = 300  # seconds; NRAS round-trips take seconds, so 5 min is the freshness/cost tradeoff
+# A hung NRAS/NVML call must not freeze the refresh cadence: abort rounds past
+# this bound and retry next cycle. Healthy rounds on the 8xH200 profile take
+# ~10 min, so the default only catches true hangs.
+DEFAULT_ROUND_TIMEOUT = 1200  # seconds
 
 
 def _is_nvidia_eat(token):
@@ -170,14 +175,35 @@ def write_atomic(path, payload):
 
 
 def collect_and_write(out_path):
+    started = time.monotonic()
     bundle = collect_bundle()
     write_atomic(out_path, bundle)
     log.info(
-        "GPU evidence refreshed: %d EATs, nonce=%s… -> %s",
+        "GPU evidence refreshed: %d EATs, nonce=%s… -> %s (round took %.0fs)",
         bundle["gpus_attested"],
         bundle["nonce"][:16],
         out_path,
+        time.monotonic() - started,
     )
+
+
+class RoundTimeoutError(RuntimeError):
+    """A collection round exceeded the configured round timeout."""
+
+
+def _round_alarm(signum, frame):
+    raise RoundTimeoutError("collection round timed out")
+
+
+def collect_and_write_bounded(out_path, timeout_s):
+    if timeout_s > 0:
+        signal.signal(signal.SIGALRM, _round_alarm)
+        signal.alarm(timeout_s)
+    try:
+        collect_and_write(out_path)
+    finally:
+        if timeout_s > 0:
+            signal.alarm(0)
 
 
 def main(argv=None):
@@ -189,9 +215,17 @@ def main(argv=None):
         default=int(os.environ.get("GPU_EVIDENCE_INTERVAL", str(DEFAULT_INTERVAL))),
         help="seconds between collection rounds in loop mode",
     )
+    parser.add_argument(
+        "--round-timeout",
+        type=int,
+        default=int(os.environ.get("GPU_EVIDENCE_ROUND_TIMEOUT", str(DEFAULT_ROUND_TIMEOUT))),
+        help="seconds before a single collection round is aborted (0 disables)",
+    )
     args = parser.parse_args(argv)
     if args.interval < 1:
         parser.error("--interval must be >= 1 second (0 hammers NRAS with the sealed key)")
+    if args.round_timeout < 0:
+        parser.error("--round-timeout must be >= 0 seconds")
     if not NRAS_URL.startswith("https://"):
         parser.error("NRAS_URL must use https — a cleartext attestation round is MITM-able")
 
@@ -203,12 +237,12 @@ def main(argv=None):
     out_path = os.environ.get("GPU_EVIDENCE_OUT", DEFAULT_OUT)
 
     if args.once:
-        collect_and_write(out_path)
+        collect_and_write_bounded(out_path, args.round_timeout)
         return 0
 
     while True:
         try:
-            collect_and_write(out_path)
+            collect_and_write_bounded(out_path, args.round_timeout)
         except Exception as exc:  # keep previous bundle; retry next cycle
             log.error("collection failed (previous bundle kept): %s", exc)
         time.sleep(args.interval)
