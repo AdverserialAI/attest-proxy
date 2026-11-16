@@ -47,6 +47,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.DevMode {
 		t.Error("DevMode should default to false")
 	}
+	if cfg.ConfidentialCacheIsolation {
+		t.Error("cache metadata binding must be opt-in for older backends")
+	}
 	if len(cfg.TLSHostnames) == 0 || cfg.TLSHostnames[0] != "api.adverserial.ai" {
 		t.Errorf("TLSHostnames should derive from ENDPOINT, got %v", cfg.TLSHostnames)
 	}
@@ -408,20 +411,21 @@ func TestResolveModelManifestRejectsMismatchedModel(t *testing.T) {
 func TestConfidentialModeDirectSignedMetering(t *testing.T) {
 	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	env := map[string]string{
-		"CONFIDENTIAL_MODE":           "1",
-		"EHBP_REQUIRED":               "1",
-		"EHBP_IDENTITY_B64":           "dGVzdA",
-		"AUTH_REQUIRED":               "0",
-		"ENTITLEMENT_JWKS_JSON":       `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
-		"ENTITLEMENT_REPLAY_DIR":      "/data/used-entitlements",
-		"METER_SIGNING_SEED":          seed,
-		"METER_OUTBOX_DIR":            "/data/meter-outbox",
-		"METER_URL":                   "https://billing.adverserial.ai",
-		"METER_DELIVERY_MODE":         "direct-signed",
-		"METER_INGRESS_SHARED_SECRET": "dedicated-meter-capability",
-		"UPSTREAM_BEARER_TOKEN":       "local-only-secret",
-		"RECEIPT_SIGNING_SEED":        seed,
-		"MODEL_DIGEST":                "sha256:" + strings.Repeat("a", 64),
+		"CONFIDENTIAL_CACHE_ISOLATION": "1",
+		"CONFIDENTIAL_MODE":            "1",
+		"EHBP_REQUIRED":                "1",
+		"EHBP_IDENTITY_B64":            "dGVzdA",
+		"AUTH_REQUIRED":                "0",
+		"ENTITLEMENT_JWKS_JSON":        `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
+		"ENTITLEMENT_REPLAY_DIR":       "/data/used-entitlements",
+		"METER_SIGNING_SEED":           seed,
+		"METER_OUTBOX_DIR":             "/data/meter-outbox",
+		"METER_URL":                    "https://billing.adverserial.ai",
+		"METER_DELIVERY_MODE":          "direct-signed",
+		"METER_INGRESS_SHARED_SECRET":  "dedicated-meter-capability",
+		"UPSTREAM_BEARER_TOKEN":        "local-only-secret",
+		"RECEIPT_SIGNING_SEED":         seed,
+		"MODEL_DIGEST":                 "sha256:" + strings.Repeat("a", 64),
 	}
 	cfg, err := FromEnv(func(k string) string { return env[k] })
 	if err != nil {
@@ -429,6 +433,9 @@ func TestConfidentialModeDirectSignedMetering(t *testing.T) {
 	}
 	if cfg.MeterDeliveryMode != "direct-signed" || cfg.MeterIngressSecret == "" {
 		t.Fatalf("direct-signed settings were not retained: %+v", cfg)
+	}
+	if !cfg.ConfidentialCacheIsolation {
+		t.Fatal("explicit confidential cache binding was not retained")
 	}
 	delete(env, "METER_INGRESS_SHARED_SECRET")
 	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
@@ -438,5 +445,19 @@ func TestConfidentialModeDirectSignedMetering(t *testing.T) {
 	env["METER_URL"] = "https://other.example"
 	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
 		t.Fatal("direct-signed config accepted a non-billing destination")
+	}
+}
+
+func TestCacheIsolationRequiresConfidentialAuthorization(t *testing.T) {
+	for _, value := range []string{"1", "not-a-boolean"} {
+		_, err := FromEnv(noAuth(func(k string) string {
+			if k == "CONFIDENTIAL_CACHE_ISOLATION" {
+				return value
+			}
+			return ""
+		}))
+		if err == nil {
+			t.Fatal("cache binding accepted without confidential authorization")
+		}
 	}
 }

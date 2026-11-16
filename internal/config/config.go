@@ -95,7 +95,8 @@ type Config struct {
 	// local verification of a billing-signed, one-use entitlement. It must be
 	// enabled only after the CVM compose has the corresponding sealed secrets
 	// and persistent volumes. It never forwards a customer API key to SGLang.
-	ConfidentialMode bool // CONFIDENTIAL_MODE
+	ConfidentialMode           bool // CONFIDENTIAL_MODE
+	ConfidentialCacheIsolation bool // CONFIDENTIAL_CACHE_ISOLATION; vLLM only, default off
 	// ConfidentialActivation keeps a newly provisioned CVM evidence-only until
 	// an independently verified, signed policy has been published. Allowed
 	// values are "pre-activation" and "active".
@@ -208,6 +209,13 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("CONFIDENTIAL_MODE: %w", err)
 	}
 	cfg.ConfidentialMode = confidentialMode
+	cfg.ConfidentialCacheIsolation, err = parseBoolDefault(getenv("CONFIDENTIAL_CACHE_ISOLATION"), false)
+	if err != nil {
+		return Config{}, fmt.Errorf("CONFIDENTIAL_CACHE_ISOLATION: %w", err)
+	}
+	if cfg.ConfidentialCacheIsolation && !cfg.ConfidentialMode {
+		return Config{}, fmt.Errorf("CONFIDENTIAL_CACHE_ISOLATION requires CONFIDENTIAL_MODE=1")
+	}
 	ehbpRequired, err := parseBoolDefault(getenv("EHBP_REQUIRED"), false)
 	if err != nil {
 		return Config{}, fmt.Errorf("EHBP_REQUIRED: %w", err)

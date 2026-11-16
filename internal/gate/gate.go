@@ -92,6 +92,9 @@ type Gate struct {
 	// one model-scoped, channel-bound request authorization and are validated
 	// entirely inside the CVM. The replay store must live on persistent storage.
 	Confidential bool
+	// Opt-in vLLM metadata binding; only valid in confidential mode. Older
+	// engines remain byte-compatible when this is false (the default).
+	ConfidentialCacheIsolation bool
 	// ConfidentialActive is false during evidence collection. In that state the
 	// proxy deliberately returns before it reads a request body, so a prompt
 	// cannot reach the CVM before the published policy is independently bound.
@@ -136,6 +139,10 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/v1/") {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if g.ConfidentialCacheIsolation && !g.Confidential {
+			writeError(w, http.StatusServiceUnavailable, "confidential cache isolation is not configured")
 			return
 		}
 		if g.Confidential && (g.Entitlements == nil || g.Replay == nil || g.ActiveSPKI == nil || g.Meter == nil || g.Billing == nil) {
@@ -253,6 +260,15 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 				g.Logger.Info("confidential entitlement denied", "model", parsedModel, "reason", err.Error())
 				writeError(w, http.StatusUnauthorized, "invalid, expired, replayed, or mismatched confidential entitlement")
 				return
+			}
+			if g.ConfidentialCacheIsolation {
+				upstreamBody, err := bindCacheSalt(body, claims)
+				if err != nil {
+					writeError(w, http.StatusBadRequest, "invalid confidential request metadata")
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(upstreamBody))
+				r.ContentLength = int64(len(upstreamBody))
 			}
 			used, err := g.Replay.Consume(claims)
 			if err != nil {

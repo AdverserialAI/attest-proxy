@@ -13,6 +13,7 @@ import (
 // the gate and the upstream read different values (Go's encoding/json matches
 // struct fields case-insensitively; pydantic is case-sensitive).
 var controlKeys = map[string]bool{
+	"cache_salt": true, "cache_namespace": true,
 	"model": true, "max_tokens": true, "max_completion_tokens": true,
 	"max_output_tokens": true, "max_new_tokens": true, "stream": true,
 	"stream_options": true, "chat_template": true, "n": true, "best_of": true,
@@ -91,6 +92,8 @@ const (
 // are already fenced; this closes equivalent fields accepted by the OpenAI
 // chat surface on different SGLang releases.
 var unsafeConfidentialKeys = map[string]string{
+	"cache_salt":          "cache isolation is managed by the confidential endpoint",
+	"cache_namespace":     "cache isolation is managed by the confidential endpoint",
 	"input_ids":           "input_ids is not supported on this endpoint",
 	"stop_token_ids":      "stop_token_ids is not supported on this endpoint",
 	"token_ids_logprob":   "token_ids_logprob is not supported on this endpoint",

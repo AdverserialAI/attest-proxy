@@ -16,9 +16,11 @@ import (
 
 var canonicalModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}/[a-z0-9][a-z0-9._-]{0,127}$`)
 var fingerprint = regexp.MustCompile(`^sha256:[A-Za-z0-9_-]{43}$`)
+var cacheNamespace = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
-// Claims is the exact v1 entitlement contract. It deliberately contains no
-// user identity, platform API key, prompt, completion, or billing balance.
+// Claims is the v1 entitlement contract with an optional opaque cache scope.
+// It contains no direct user identity, platform API key, prompt, completion or
+// balance. Opt-in cache scope deliberately links requests within one account.
 type Claims struct {
 	Issuer          string `json:"iss"`
 	Audience        string `json:"aud"`
@@ -28,7 +30,9 @@ type Claims struct {
 	MaxInputTokens  int    `json:"max_input_tokens"`
 	MaxOutputTokens int    `json:"max_output_tokens"`
 	MaxRequests     int    `json:"max_requests"`
-	Confirmation    struct {
+	// Optional, billing-signed opaque cache scope; never a customer identity.
+	CacheNamespace string `json:"cache_namespace,omitempty"`
+	Confirmation   struct {
 		TLSSPKISHA256 string `json:"tls_spki_sha256"`
 	} `json:"cnf"`
 	IssuedAt int64 `json:"iat"`
@@ -124,6 +128,9 @@ func (v Validator) Validate(token, requestedModel, expectedSPKI string, requestB
 	}
 	if zero.ID == "" || !canonicalModelID.MatchString(zero.Model) || zero.Model != requestedModel || zero.MaxRequests != 1 || zero.MaxInputTokens < 1 || zero.MaxOutputTokens < 1 {
 		return Claims{}, fmt.Errorf("malformed or mismatched entitlement")
+	}
+	if zero.CacheNamespace != "" && !cacheNamespace.MatchString(zero.CacheNamespace) {
+		return Claims{}, fmt.Errorf("invalid entitlement cache namespace")
 	}
 	if !fingerprint.MatchString(expectedSPKI) || zero.Confirmation.TLSSPKISHA256 != expectedSPKI {
 		return Claims{}, fmt.Errorf("entitlement TLS channel binding mismatch")

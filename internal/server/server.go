@@ -170,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 		replay := &entitlement.UsedStore{Dir: s.cfg.EntitlementReplayDir}
 		replay.StartSweeper(make(chan struct{})) // runs for the process lifetime
 		g.Confidential = true
+		g.ConfidentialCacheIsolation = s.cfg.ConfidentialCacheIsolation
 		g.Entitlements = &entitlement.Validator{Keys: keys, Issuer: s.cfg.EntitlementIssuer, Audience: s.cfg.EntitlementAudience}
 		g.Replay = replay
 		g.ActiveSPKI = func() string { return attestation.SPKIHash(s.holder.Leaf()) }
