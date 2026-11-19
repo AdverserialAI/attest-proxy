@@ -68,11 +68,12 @@ const (
 	// cardinality as well as bytes so a compact JSON body cannot expand into an
 	// disproportionately large model prompt after the entitlement is checked.
 	// The ceiling must fit real agentic harness sessions: kimi-code, claude-code,
-	// codex, and opencode carry the full message history on every turn, which
-	// reaches a few hundred messages in ordinary use. The 8 MiB body cap remains
-	// the real memory bound; this bound only prevents degenerate
-	// many-tiny-messages expansion.
-	maxConversationItems      = 512
+	// codex, and opencode carry the full message history on every turn. With a
+	// 1M-token context a tool-heavy session reaches several thousand messages
+	// (a kimi-code session hit the previous 512 ceiling at about 365k tokens).
+	// The 8 MiB body cap remains the real memory bound; this bound only
+	// prevents degenerate many-tiny-messages expansion.
+	maxConversationItems      = 16384
 	maxToolCallsPerMessage    = 16
 	maxContentPartsPerMessage = 32
 	// OpenAI specifies a maximum of 20 alternatives per generated token. This
