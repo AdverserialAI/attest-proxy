@@ -612,6 +612,25 @@ The operator cannot:
   VM's quote or to the client's nonce. The receipt signs a digest of the
   evidence that contains them, which shows the enclave served them, not that
   the GPUs they describe are the ones attached to it.
+- **In the reference deployment the OS does not attest the GPUs at boot.**
+  The guest OS there, dstack 0.6.5, can attest the GPUs itself and require
+  each GPU's Confidential Computing mode to be on before it releases the VM's
+  keys. The hosting provider switched that check off for this VM
+  (`"requirements":{"gpu_policy":{"attest_gpu":false}}` in the measured
+  app-compose): eight H200 GPUs run in NVIDIA's multi-GPU Protected PCIe
+  mode, in which the per-GPU Confidential Computing status reads off, and the
+  0.6.5 check does not recognise that mode and would refuse to boot. The
+  provider says it will add support and tell us when the flag can be removed.
+  The protection is the same as on dstack 0.5.x, which had no such check, but
+  nothing in the measured boot chain currently verifies the GPUs' protected
+  mode. The opt-out is visible in the evidence this proxy serves: the event
+  log has the RTMR3 event `gpu-policy-hash` =
+  SHA-256 of `{"attest_gpu":false}` =
+  `930188e08f58d0c555acff500a40be79c1f7e1d9ae23d26d901486cc9cc1a77d` and no
+  `gpu-attestation` event. The collector's NRAS rounds, which continue, show
+  genuine GPUs, firmware measurements NVIDIA accepts, secure boot on and
+  debug off; they do not by themselves prove Protected PCIe mode. The proxy
+  neither reads nor enforces the GPU policy.
 - **Stale GPU evidence does not stop inference.** After 30 minutes the proxy
   sets `gpu_evidence_stale` and keeps serving. Refusing is the client
   verifier's job. The proxy also does not verify the tokens' signatures.
@@ -982,6 +1001,23 @@ is the compose file of the `adverserial/cyberseek` deployment
 contains no credential: the four secrets appear only as `${VAR}`
 references, and the long base64 value is the expected model manifest (file
 names, sizes, and SHA-256 hashes).
+
+**Platform (as of 2026-11-24).** One Intel TDX VM on Phala Cloud with eight
+NVIDIA H200 GPUs, guest OS image `dstack-0.6.5`
+(`os_image_hash` `4771a29e03e93f0e2d5e37174cd8bb1112942c9689deb36b16c5df9e183d8623`,
+NVIDIA driver 595.91.07). The hosting provider moved the VM to this image on
+2026-11-24; a rollout on `dstack-nvidia-0.5.15` earlier that day never served
+a request, because one GPU failed to initialise at every boot. dstack measures
+the app-compose document that wraps this compose file, not the file itself;
+its hash on this deployment is `compose_hash`
+`9c78bf82dfad3a133838f2ac87406b3fe1c9d875d8a4d5fbe04e9f34d7d3b820`. The exact
+measured bytes are published in
+[cyberseek-transparency](https://github.com/AdverserialAI/cyberseek-transparency/tree/main/deployments/v0.1.0-rc.33-os-0.6.5)
+and in
+[confidential-infra](https://github.com/AdverserialAI/confidential-infra/tree/main/deployed).
+That document sets `"attest_gpu": false`; see *Known limits*. The policy
+clients verify against is updated only after a live attestation of this
+configuration has been checked.
 
 **Network.** Two Docker networks: `default`, and `inference`, which is
 `internal: true` (no route out of the VM). The proxy is on both. The model
