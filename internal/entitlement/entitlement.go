@@ -150,8 +150,8 @@ func (v Validator) Validate(token, requestedModel, expectedSPKI string, requestB
 // TenantID is the cache-isolation identity of the entitlement holder. With a
 // billing-signed sub it is stable per account, so one account's requests can
 // share prefix-cache entries. Without one it falls back to the single-use
-// jti, which isolates every request from every other request: always safe,
-// never a cache hit. The two namespaces are prefixed so they cannot collide.
+// jti, which isolates every request from every other request unless the
+// client sends its own cache_salt (see gate.bindCacheSalt). Prefixes differ.
 func (c Claims) TenantID() string {
 	if c.Subject != "" {
 		return "sub:" + c.Subject

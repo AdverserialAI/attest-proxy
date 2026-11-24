@@ -108,8 +108,8 @@ type Config struct {
 	// and persistent volumes. It never forwards a customer API key to SGLang.
 	ConfidentialMode bool // CONFIDENTIAL_MODE
 	// ConfidentialActivation keeps a newly provisioned CVM evidence-only until
-	// an independently verified, signed policy has been published. Allowed
-	// values are "pre-activation" and "active".
+	// its policy has been published; the proxy does not check that itself.
+	// Allowed values are "pre-activation" and "active".
 	ConfidentialActivation string // CONFIDENTIAL_ACTIVATION
 	EntitlementJWKS        string // ENTITLEMENT_JWKS_JSON — billing public keys
 	EntitlementIssuer      string // ENTITLEMENT_ISSUER
@@ -118,8 +118,8 @@ type Config struct {
 	MeterIssuer            string // METER_ISSUER
 	MeterAudience          string // METER_AUDIENCE
 	MeterOutboxDir         string // METER_OUTBOX_DIR — persistent volume
-	// MeterURL is the externally deployed TLS-terminating meter ingress. In
-	// confidential mode it is mandatory and must not be the Heroku billing app.
+	// MeterURL is where signed meter records are posted: the mTLS meter ingress
+	// (mtls-ingress) or https://billing.adverserial.ai (direct-signed). Required.
 	MeterURL            string // METER_URL — e.g. https://meter-ingress.adverserial.ai
 	MeterClientCertFile string // METER_CLIENT_CERT_FILE — materialized CVM client certificate PEM
 	MeterClientKeyFile  string // METER_CLIENT_KEY_FILE — materialized CVM client private key PEM

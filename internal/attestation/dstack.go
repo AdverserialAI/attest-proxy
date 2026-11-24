@@ -28,8 +28,8 @@ type QuoteSource interface {
 	Quote(ctx context.Context, reportData [64]byte) (Quote, error)
 }
 
-// DstackClient calls the dstack guest agent over its unix socket using the
-// prpc-style HTTP API (endpoints /Info, /Quote, /GetKey).
+// DstackClient calls the dstack guest agent over its unix socket. The only
+// endpoint this proxy uses is POST /GetQuote; it never calls /GetKey.
 type DstackClient struct {
 	http *http.Client
 }
@@ -46,12 +46,12 @@ func NewDstackClient(socketPath string) *DstackClient {
 	return &DstackClient{http: &http.Client{Transport: tr, Timeout: 15 * time.Second}}
 }
 
-// quoteRequest is the dstack /Quote request body.
+// quoteRequest is the dstack /GetQuote request body.
 type quoteRequest struct {
 	ReportData string `json:"report_data"` // hex-encoded, up to 64 bytes
 }
 
-// quoteResponse is the dstack /Quote response body.
+// quoteResponse is the dstack /GetQuote response body.
 type quoteResponse struct {
 	Quote    string          `json:"quote"`
 	EventLog json.RawMessage `json:"event_log"`

@@ -528,8 +528,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAttestation implements WP-3: validate the client nonce, fetch a fresh
-// TDX quote bound to nonce + TLS SPKI + receipt pubkey, build the evidence,
-// and mint the ES256 verification receipt (WP-4 channel binding).
+// TDX quote bound to nonce + TLS SPKI + receipt pubkey + EHBP receiver key,
+// build the evidence, and mint the ES256 verification receipt (WP-4).
 func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
