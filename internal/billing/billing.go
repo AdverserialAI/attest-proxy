@@ -27,8 +27,8 @@ import (
 // Client talks to the billing service.
 type Client struct {
 	BaseURL string // legacy billing URL, e.g. https://billing.adverserial.ai
-	// MeterURL is the distinct mTLS meter-ingress URL in confidential mode.
-	// It must terminate TLS at an ingress that verifies the CVM client cert.
+	// MeterURL is the confidential meter destination: the mTLS meter ingress,
+	// or billing itself when direct-signed delivery is selected.
 	MeterURL           string
 	MeterIngressSecret string // direct-signed meter capability, never used for prompt traffic
 	WriterSecret       string

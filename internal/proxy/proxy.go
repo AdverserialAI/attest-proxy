@@ -2,10 +2,10 @@
 // server and the request-logging middleware.
 //
 // Content policy (WP-2 hard requirement): this proxy NEVER logs request or
-// response bodies, headers, cookies, query strings, or any data derived from
-// them. Logs carry method, path class, status, byte count, and duration only.
-// There is deliberately no debug/content log level and no LOG_CONTENT-style
-// escape hatch.
+// response bodies, headers, cookies, or query strings. Access-log lines carry
+// method, path class, status, byte count, and duration only; other packages
+// log request IDs and error reasons, never content. There is deliberately no
+// debug/content log level and no LOG_CONTENT-style escape hatch.
 package proxy
 
 import (
@@ -185,8 +185,8 @@ func SettleRecovery(logger *slog.Logger, next http.Handler) http.Handler {
 // Logging returns middleware that logs one line per request: method, path
 // class, status, response byte count, and duration. It never touches request
 // or response bodies, headers, or query strings. Token counts are not logged:
-// they live inside response bodies (final SSE usage chunk), which this proxy
-// does not inspect.
+// the usage tap (usage.go) reads them from the response for metering and
+// receipts, but they never enter a log line.
 func Logging(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

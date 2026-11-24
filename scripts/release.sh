@@ -16,7 +16,7 @@ go build -ldflags "-s -w -X github.com/adverserial/attest-proxy/internal/buildin
   -o "$OUT/attest-proxy" ./cmd/attest-proxy
 shasum -a 256 "$OUT/attest-proxy" | awk '{print $1}' > "$OUT/attest-proxy.sha256"
 
-# 2. SBOM: module list from the binary itself (stdlib-only → this is short) + syft if available.
+# 2. SBOM: module list from the binary itself (EHBP and its dependencies) + syft if available.
 go version -m "$OUT/attest-proxy" > "$OUT/sbom.go-modules.txt"
 if command -v syft >/dev/null; then
   syft "$OUT/attest-proxy" -o spdx-json > "$OUT/sbom.spdx.json"

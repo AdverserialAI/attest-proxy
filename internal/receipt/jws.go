@@ -20,8 +20,8 @@ import (
 // confidential mode the key is generated inside the CVM (internal/enclavekeys)
 // and reaches this package through NewSignerFromKey.
 //
-// TODO(v1): additionally seal the stored key to the expected RTMR policy via
-// the dstack KMS (/GetKey).
+// Known limit: the stored key is a file on the CVM's encrypted state volume.
+// It is not sealed to an RTMR policy through the dstack KMS (/GetKey).
 type Signer struct {
 	key *ecdsa.PrivateKey
 	kid string

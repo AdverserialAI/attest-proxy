@@ -176,7 +176,7 @@ func (t *UsageTap) ModifyResponse(resp *http.Response) error {
 // scrubErrorBody replaces an upstream error body with a sanitized JSON error.
 // The status code is kept, but tracebacks, absolute filesystem paths, and
 // framework internals ("/sgl-workspace/...", Python file lines) never reach
-// the client. Only runs for confidential dispatched requests.
+// the client. Runs for every non-200 upstream response, in every mode.
 func scrubErrorBody(resp *http.Response) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
 	_ = resp.Body.Close()
