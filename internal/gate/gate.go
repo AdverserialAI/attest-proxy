@@ -261,7 +261,8 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			}
 			claims, err := g.Entitlements.Validate(key, parsedModel, g.ActiveSPKI(), clientBodyLen, parsedMaxOut)
 			if err != nil {
-				g.Logger.Info("confidential entitlement denied", "model", parsedModel, "reason", err.Error())
+				// The model name comes from the decrypted request body, so it is not logged.
+				g.Logger.Info("confidential entitlement denied", "reason", err.Error())
 				writeError(w, http.StatusUnauthorized, "invalid, expired, replayed, or mismatched confidential entitlement")
 				return
 			}
