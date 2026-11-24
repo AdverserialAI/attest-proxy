@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -212,10 +213,10 @@ func setupTLS(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ser
 		Email:            cfg.ACMEEmail,
 		Zone:             zone,
 		DNS:              dns,
-		PropagationDelay: 10 * time.Second, // let DNS converge before CA validation
+		PropagationDelay: 30 * time.Second, // let DNS converge before CA validation
 	}, accountKey)
 
-	cert, err := acme.LoadOrIssue(ctx, store, client, cfg.ACMEDomains, acme.DefaultRenewBefore, logger)
+	cert, err := issueWithBackoff(ctx, store, client, cfg.ACMEDomains, logger)
 	if err != nil {
 		return nil, fmt.Errorf("acme: %w", err)
 	}
@@ -272,6 +273,28 @@ func renewLoop(ctx context.Context, store acme.Store, client *acme.Client, holde
 				"not_after", holder.Leaf().NotAfter.Format(time.RFC3339),
 				"tls_spki_sha256", attestation.SPKIHash(holder.Leaf()),
 			)
+		}
+	}
+}
+
+// issueWithBackoff retries first-boot issuance in-process instead of exiting:
+// a fatal exit hands pacing to the container restart policy (seconds apart),
+// which exhausts the CA's 5-failed-validations-per-hour budget in minutes.
+// The schedule (1m, 5m, then every 15m) stays inside that budget indefinitely.
+func issueWithBackoff(ctx context.Context, store acme.Store, client *acme.Client, domains []string, logger *slog.Logger) (tls.Certificate, error) {
+	delays := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}
+	for attempt := 0; ; attempt++ {
+		cert, err := acme.LoadOrIssue(ctx, store, client, domains, acme.DefaultRenewBefore, logger)
+		if err == nil {
+			return cert, nil
+		}
+		delay := delays[min(attempt, len(delays)-1)]
+		logger.Error("ACME issuance failed; will retry",
+			"attempt", attempt+1, "retry_in", delay.String(), "error", err.Error())
+		select {
+		case <-ctx.Done():
+			return tls.Certificate{}, ctx.Err()
+		case <-time.After(delay):
 		}
 	}
 }

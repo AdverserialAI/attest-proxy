@@ -118,7 +118,7 @@ func (c *CloudflareProvider) SetTXTs(ctx context.Context, name string, values []
 	}
 	existing := map[string]string{} // content -> record id
 	for _, rec := range records {
-		existing[rec.Content] = rec.ID
+		existing[cfTXTContent(rec.Content)] = rec.ID
 	}
 	for i, value := range values {
 		body, err := json.Marshal(map[string]any{
@@ -161,7 +161,7 @@ func (c *CloudflareProvider) DeleteTXT(ctx context.Context, name, value string) 
 		return err
 	}
 	for _, rec := range records {
-		if value != "" && rec.Content != value {
+		if value != "" && cfTXTContent(rec.Content) != value {
 			continue
 		}
 		u := fmt.Sprintf("%s/zones/%s/dns_records/%s",
@@ -234,4 +234,14 @@ func (c *CloudflareProvider) do(req *http.Request, out any, extraOK ...int) erro
 		}
 	}
 	return nil
+}
+
+// cfTXTContent strips the surrounding double quotes Cloudflare may add when
+// it returns TXT content, so comparisons against the raw challenge value hold
+// in either representation.
+func cfTXTContent(content string) string {
+	if len(content) >= 2 && strings.HasPrefix(content, `"`) && strings.HasSuffix(content, `"`) {
+		return content[1 : len(content)-1]
+	}
+	return content
 }
