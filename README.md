@@ -157,7 +157,7 @@ Evidence object (actual `DEV_MODE=1` output, keys as served):
     "model_digest": "sha256:…",
     "model_id": "lordx64/cyberglm",
     "policy_id": "adverserial-policy/dev",
-    "proxy_version": "v0.1.0-rc.31"
+    "proxy_version": "v0.1.0-rc.32"
   }
 }
 ```
@@ -484,7 +484,7 @@ counters only — no secrets and nothing derived from a request:
 
 ```json
 {
-  "version": "v0.1.0-rc.31",
+  "version": "v0.1.0-rc.32",
   "started_at": "2026-11-24T10:00:00Z",
   "keys_origin": "enclave-generated",
   "receipt_kid": "<RFC 7638 thumbprint of the receipt key>",

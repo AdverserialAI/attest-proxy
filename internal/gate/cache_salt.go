@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 )
 
 // SGLang keys its radix prefix cache on the per-request cache_salt and
@@ -68,6 +69,14 @@ func bindCacheSalt(body, key []byte, tenantID string) ([]byte, error) {
 	var clientSalt string
 	if raw, ok := doc["cache_salt"]; ok {
 		_ = json.Unmarshal(raw, &clientSalt) // validated above
+	}
+	// An entitlement without a billing-signed subject is isolated per request
+	// (its tenant ID is the single-use jti). If such a client supplies its own
+	// salt, that salt becomes the partition: it is at least 32 characters the
+	// client chose and keeps secret, so only holders of the same salt can share
+	// entries, and nobody else can name the partition.
+	if clientSalt != "" && strings.HasPrefix(tenantID, "jti:") {
+		tenantID = "client-salt"
 	}
 	salt, err := json.Marshal(tenantCacheSalt(key, tenantID, clientSalt))
 	if err != nil {

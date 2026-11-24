@@ -154,11 +154,20 @@ func TestTenantCacheSaltCannotBeSteeredByTheClient(t *testing.T) {
 		}
 	}
 
-	// No sub claim: the tenant falls back to the single-use jti.
+	// No sub claim and no client salt: the tenant falls back to the
+	// single-use jti, so nothing is shared.
+	if s.salt("/v1/chat/completions", "", chatBody("")) == s.salt("/v1/chat/completions", "", chatBody("")) {
+		t.Error("requests without a signed subject or client salt share a cache key")
+	}
+	// No sub claim but a client-chosen secret salt: that salt is the
+	// partition, and it never reaches a subject-bound tenant's partition.
 	first := s.salt("/v1/chat/completions", "", withA)
 	second := s.salt("/v1/chat/completions", "", withA)
-	if first == second {
-		t.Error("requests without a signed subject share a cache key")
+	if first != second {
+		t.Error("a client salt without a signed subject must be a stable partition")
+	}
+	if first == victim {
+		t.Error("a client-salt partition reached a subject-bound tenant's partition")
 	}
 	// A subject equal to another entitlement's jti cannot collide with the
 	// jti namespace.
@@ -298,5 +307,39 @@ func TestLegacyModeLeavesCacheFieldsAlone(t *testing.T) {
 	rec := postChat(t, g.Middleware(okHandler(t)), "", `{"model":"m","cache_salt":"x","extra_key":"y"}`)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cache_salt":"x"`) {
 		t.Errorf("legacy request altered: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestClientSaltPartitionsWhenNoSubject(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	saltA := strings.Repeat("a", 43)
+	saltB := strings.Repeat("b", 43)
+	get := func(body, tenant string) string {
+		t.Helper()
+		out, err := bindCacheSalt([]byte(body), key, tenant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]string
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc["cache_salt"]
+	}
+	// Same client salt across two single-use entitlements: same partition.
+	if get(`{"cache_salt":"`+saltA+`"}`, "jti:1") != get(`{"cache_salt":"`+saltA+`"}`, "jti:2") {
+		t.Error("same client salt without subject must share a partition")
+	}
+	// Different client salts never share.
+	if get(`{"cache_salt":"`+saltA+`"}`, "jti:1") == get(`{"cache_salt":"`+saltB+`"}`, "jti:2") {
+		t.Error("different client salts must not share")
+	}
+	// No client salt: every request is alone.
+	if get(`{}`, "jti:1") == get(`{}`, "jti:2") {
+		t.Error("requests without subject or salt must not share")
+	}
+	// A subject-bound tenant never lands in the client-salt partition.
+	if get(`{"cache_salt":"`+saltA+`"}`, "sub:x") == get(`{"cache_salt":"`+saltA+`"}`, "jti:1") {
+		t.Error("subject tenants must stay separate from client-salt partitions")
 	}
 }
