@@ -300,3 +300,37 @@ func TestLegacyModeLeavesCacheFieldsAlone(t *testing.T) {
 		t.Errorf("legacy request altered: %d %s", rec.Code, rec.Body)
 	}
 }
+
+func TestClientSaltPartitionsWhenNoSubject(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	saltA := strings.Repeat("a", 43)
+	saltB := strings.Repeat("b", 43)
+	get := func(body, tenant string) string {
+		t.Helper()
+		out, err := bindCacheSalt([]byte(body), key, tenant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]string
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc["cache_salt"]
+	}
+	// Same client salt across two single-use entitlements: same partition.
+	if get(`{"cache_salt":"`+saltA+`"}`, "jti:1") != get(`{"cache_salt":"`+saltA+`"}`, "jti:2") {
+		t.Error("same client salt without subject must share a partition")
+	}
+	// Different client salts never share.
+	if get(`{"cache_salt":"`+saltA+`"}`, "jti:1") == get(`{"cache_salt":"`+saltB+`"}`, "jti:2") {
+		t.Error("different client salts must not share")
+	}
+	// No client salt: every request is alone.
+	if get(`{}`, "jti:1") == get(`{}`, "jti:2") {
+		t.Error("requests without subject or salt must not share")
+	}
+	// A subject-bound tenant never lands in the client-salt partition.
+	if get(`{"cache_salt":"`+saltA+`"}`, "sub:x") == get(`{"cache_salt":"`+saltA+`"}`, "jti:1") {
+		t.Error("subject tenants must stay separate from client-salt partitions")
+	}
+}
