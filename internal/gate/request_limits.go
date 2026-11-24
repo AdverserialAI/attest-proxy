@@ -35,6 +35,8 @@ var controlKeys = map[string]bool{
 	"json_schema": true, "guided_json": true, "guided_regex": true,
 	"guided_grammar": true, "stop": true, "tools": true, "tool_choice": true,
 	"sampling_params": true,
+	// rc.31: the prefix-cache key belongs to the proxy, not the client
+	"cache_salt": true, "extra_key": true,
 }
 
 // fanoutKeys multiply generation server-side: n parallel completions (or
@@ -214,6 +216,9 @@ func parseRequestLimits(confidential bool, requestPath string, body []byte) (mod
 		if controlKeys[fold] && key != fold {
 			return "", 0, fmt.Errorf("control field %q must use lowercase spelling %q", key, fold)
 		}
+	}
+	if err := validateCacheIsolationFields(doc); err != nil {
+		return "", 0, err
 	}
 	if raw, ok := doc["model"]; ok {
 		_ = json.Unmarshal(raw, &model) // non-string → empty model

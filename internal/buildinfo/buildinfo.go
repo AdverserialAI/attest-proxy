@@ -3,4 +3,4 @@
 package buildinfo
 
 // Version is reported as workload.proxy_version in attestation evidence.
-var Version = "0.1.0"
+var Version = "v0.1.0-rc.31"

@@ -40,16 +40,14 @@ type Signer struct {
 	kid     string
 }
 
-// NewSigner parses the sealed 32-byte base64url seed. A proxy never accepts a
-// generated production key: it must be provisioned deliberately so billing
-// can pin the matching public JWK before the CVM is started.
-func NewSigner(seed string) (*Signer, error) {
-	seed = strings.TrimPrefix(seed, "ed25519:")
-	b, err := base64.RawURLEncoding.DecodeString(seed)
-	if err != nil || len(b) != ed25519.SeedSize {
-		return nil, fmt.Errorf("METER_SIGNING_SEED must be a 32-byte base64url Ed25519 seed")
+// NewSignerFromKey wraps an Ed25519 key generated inside the enclave. There
+// is deliberately no constructor that accepts key material from configuration:
+// billing learns the public key from the meter JWKS endpoint and its quote
+// binding, never by provisioning the private half.
+func NewSignerFromKey(private ed25519.PrivateKey) (*Signer, error) {
+	if len(private) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("meter signing key must be an Ed25519 private key")
 	}
-	private := ed25519.NewKeyFromSeed(b)
 	sum := sha256.Sum256(private.Public().(ed25519.PublicKey))
 	return &Signer{private: private, kid: base64.RawURLEncoding.EncodeToString(sum[:])}, nil
 }
@@ -59,8 +57,19 @@ func NewTestSigner() (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(private.Public().(ed25519.PublicKey))
-	return &Signer{private: private, kid: base64.RawURLEncoding.EncodeToString(sum[:])}, nil
+	return NewSignerFromKey(private)
+}
+
+// KeyID is the base64url SHA-256 of the raw Ed25519 public key; it is the kid
+// of every meter JWS and of the published JWK.
+func (s *Signer) KeyID() string { return s.kid }
+
+// Thumbprint is the RFC 7638 JWK SHA-256 thumbprint of the public key
+// (RFC 8037 §2: members crv, kty, x), base64url without padding.
+func (s *Signer) Thumbprint() string {
+	x := base64.RawURLEncoding.EncodeToString(s.private.Public().(ed25519.PublicKey))
+	sum := sha256.Sum256([]byte(`{"crv":"Ed25519","kty":"OKP","x":"` + x + `"}`))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func (s *Signer) PublicJWK() map[string]string {

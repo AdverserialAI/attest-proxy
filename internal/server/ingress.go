@@ -15,10 +15,11 @@ const (
 	// before it can be buffered or decrypted.
 	maxEncryptedConfidentialBody int64 = 9 << 20
 
-	// An inference server on this node admits a small fixed queue. Keep the
-	// pre-auth encrypted-body work similarly bounded, so a fan-out cannot turn
+	// Keep the pre-auth encrypted-body work bounded, so a fan-out cannot turn
 	// into unbounded allocations, goroutines, or HPKE work before admission.
-	maxConfidentialIngress = 16
+	// The bound tracks the inference server's admission queue: 48 concurrent
+	// requests, each buffering at most 9 MiB of ciphertext (432 MiB worst case).
+	maxConfidentialIngress = 48
 
 	// The request body has a known, small upper bound. This deadline applies
 	// only while its body is open; it does not limit a long-lived SSE response.

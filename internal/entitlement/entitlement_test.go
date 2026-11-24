@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,5 +71,44 @@ func TestParseJWKS(t *testing.T) {
 	}
 	if _, err := ParseJWKS(`{"keys":[]}`); err == nil {
 		t.Error("empty JWKS accepted")
+	}
+}
+
+func TestSubjectClaimAndTenantID(t *testing.T) {
+	pub, private, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Unix(1_760_000_000, 0)
+	spki := "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	v := Validator{Keys: map[string]ed25519.PublicKey{"k": pub}, Issuer: "issuer", Audience: "aud", Now: func() time.Time { return now }}
+	claims := func(sub any) map[string]any {
+		c := map[string]any{"iss": "issuer", "aud": "aud", "typ": "adverserial-confidential-entitlement/v1", "jti": "r-1", "model": "lordx64/cyberglm", "max_input_tokens": 10, "max_output_tokens": 2, "max_requests": 1, "cnf": map[string]string{"tls_spki_sha256": spki}, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix()}
+		if sub != nil {
+			c["sub"] = sub
+		}
+		return c
+	}
+	validate := func(sub any) (Claims, error) {
+		return v.Validate(testToken(t, private, "k", claims(sub)), "lordx64/cyberglm", spki, 1, 1)
+	}
+
+	got, err := validate("acct_7Hq.org:42-x")
+	if err != nil {
+		t.Fatalf("valid subject refused: %v", err)
+	}
+	if got.TenantID() != "sub:acct_7Hq.org:42-x" {
+		t.Errorf("TenantID = %q", got.TenantID())
+	}
+	// Entitlements minted before rc.31 carry no sub: still valid, isolated
+	// per single-use jti.
+	got, err = validate(nil)
+	if err != nil {
+		t.Fatalf("entitlement without sub refused: %v", err)
+	}
+	if got.TenantID() != "jti:r-1" {
+		t.Errorf("fallback TenantID = %q", got.TenantID())
+	}
+	for _, bad := range []any{"has space", "nul\x00byte", "slash/y", strings.Repeat("a", 129), 42, []string{"a"}, map[string]string{"a": "b"}} {
+		if _, err := validate(bad); err == nil {
+			t.Errorf("malformed subject %v accepted", bad)
+		}
 	}
 }

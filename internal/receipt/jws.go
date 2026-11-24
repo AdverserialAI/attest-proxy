@@ -16,11 +16,12 @@ import (
 	"github.com/adverserial/attest-proxy/internal/canonjson"
 )
 
-// Signer holds the in-enclave receipt-signing key (ECDSA P-256).
+// Signer holds the in-enclave receipt-signing key (ECDSA P-256). In
+// confidential mode the key is generated inside the CVM (internal/enclavekeys)
+// and reaches this package through NewSignerFromKey.
 //
-// TODO(v1): generate or unwrap this key via the dstack KMS (/GetKey) and seal
-// it to the expected RTMR policy instead of generating ephemeral key material
-// at process start.
+// TODO(v1): additionally seal the stored key to the expected RTMR policy via
+// the dstack KMS (/GetKey).
 type Signer struct {
 	key *ecdsa.PrivateKey
 	kid string
@@ -37,10 +38,9 @@ func NewSigner() (*Signer, error) {
 	return NewSignerFromKey(key)
 }
 
-// NewSignerFromSeed deterministically derives a P-256 signer from a sealed
-// 32-byte base64url seed. The seed must only be supplied through the CVM's
-// sealed environment. This makes the receipt public key stable across normal
-// restarts and lets the public policy pin it before inference is activated.
+// NewSignerFromSeed deterministically derives a P-256 signer from a 32-byte
+// base64url seed. Development only: whoever supplies the seed knows the key,
+// so configuration refuses RECEIPT_SIGNING_SEED in confidential mode.
 func NewSignerFromSeed(encoded string) (*Signer, error) {
 	encoded = strings.TrimPrefix(strings.TrimSpace(encoded), "p256:")
 	seed, err := base64.RawURLEncoding.DecodeString(encoded)
@@ -62,8 +62,8 @@ func NewSignerFromSeed(encoded string) (*Signer, error) {
 	return NewSignerFromKey(&ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y}, D: d})
 }
 
-// NewSignerFromKey wraps an existing key (used by tests and, later, KMS
-// unsealing).
+// NewSignerFromKey wraps an existing key: the enclave-generated key in
+// confidential mode, or a test key.
 func NewSignerFromKey(key *ecdsa.PrivateKey) (*Signer, error) {
 	pub := key.Public().(*ecdsa.PublicKey)
 	der, err := x509.MarshalPKIXPublicKey(pub)

@@ -114,6 +114,11 @@ type Gate struct {
 
 	TTL time.Duration // verdict cache lifetime, default 60s
 
+	// cacheSaltKey keys the tenant-derived prefix-cache salt. It is 32 random
+	// bytes drawn once per process and held in memory only, so the forwarded
+	// salt cannot be computed or predicted outside this process.
+	cacheSaltKey []byte
+
 	mu    sync.Mutex
 	cache map[string]cacheEntry
 
@@ -132,6 +137,12 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 	}
 	if g.newRequestID == nil {
 		g.newRequestID = newUUID
+	}
+	if g.Confidential && g.cacheSaltKey == nil {
+		g.cacheSaltKey = make([]byte, 32)
+		if _, err := rand.Read(g.cacheSaltKey); err != nil {
+			panic(err) // crypto/rand failure is unrecoverable
+		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/v1/") {
@@ -254,6 +265,17 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 				writeError(w, http.StatusUnauthorized, "invalid, expired, replayed, or mismatched confidential entitlement")
 				return
 			}
+			// Tenant cache isolation: the forwarded cache_salt is derived from
+			// the billing-signed tenant identity, never taken from the client.
+			// Done before the entitlement is consumed so a refusal burns nothing.
+			salted, err := bindCacheSalt(body, g.cacheSaltKey, claims.TenantID())
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			body = salted
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
 			used, err := g.Replay.Consume(claims)
 			if err != nil {
 				g.Logger.Error("confidential replay store failed", "error", err.Error())

@@ -65,6 +65,41 @@ type Server struct {
 	// entitlement; without this bound, an anonymous client could fan out
 	// expensive body work and pressure the proxy before authentication.
 	ingressSlots chan struct{}
+
+	// meterSigner is the enclave-generated Ed25519 meter key. Confidential
+	// mode has no other source for it.
+	meterSigner *meter.Signer
+	// upstreamBearer yields the current VM-internal inference credential.
+	upstreamBearer func() string
+	// keysOrigin is published at /statusz and in the key attestation.
+	keysOrigin string
+	started    time.Time
+	// upstreamReady is the confidential readiness probe (nil when not probing).
+	upstreamReady  func() bool
+	keyAttestation keyAttestationCache
+}
+
+// Options carries runtime state created at process start that is not plain
+// configuration: enclave-generated key material and the credential source.
+type Options struct {
+	// MeterSigner signs confidential meter events. Required in confidential
+	// mode.
+	MeterSigner *meter.Signer
+	// UpstreamBearer returns the current upstream credential; it is called
+	// per request so a rotated credential file takes effect immediately.
+	UpstreamBearer func() string
+	// KeysOrigin describes where the signing keys came from, for example
+	// enclavekeys.Origin.
+	KeysOrigin string
+}
+
+// Configure applies opts. It must be called before Handler.
+func (s *Server) Configure(opts Options) {
+	s.meterSigner = opts.MeterSigner
+	s.upstreamBearer = opts.UpstreamBearer
+	if opts.KeysOrigin != "" {
+		s.keysOrigin = opts.KeysOrigin
+	}
 }
 
 // New assembles the server. holder supplies the active serving certificate;
@@ -94,6 +129,8 @@ func New(
 		gpu:             gpu,
 		ehbp:            receiver,
 		now:             time.Now,
+		started:         time.Now().UTC(),
+		keysOrigin:      "process-ephemeral",
 		attestationRate: newRateBucket(20, 0.5),
 		ingressSlots:    make(chan struct{}, maxConfidentialIngress),
 	}
@@ -142,8 +179,20 @@ func (s *Server) Handler() http.Handler {
 		Enforce:            s.cfg.AuthRequired,
 		ConfidentialActive: s.cfg.ConfidentialActivation == "active",
 	}
+	bearer := s.upstreamBearer
+	if bearer == nil && s.cfg.UpstreamBearer != "" {
+		static := s.cfg.UpstreamBearer
+		bearer = func() string { return static }
+	}
 	if s.cfg.ConfidentialMode {
-		g.UpstreamReady = upstreamReadyProbe(upstream, s.cfg.UpstreamBearer)
+		if bearer == nil {
+			// Never forward a client entitlement upstream: with no credential
+			// source the Authorization header is stripped, and the runtime
+			// (which requires its own credential) refuses the request.
+			bearer = func() string { return "" }
+		}
+		s.upstreamReady = upstreamReadyProbe(upstream, bearer)
+		g.UpstreamReady = s.upstreamReady
 	}
 	tap := &proxy.UsageTap{
 		Logger: s.logger,
@@ -163,9 +212,9 @@ func (s *Server) Handler() http.Handler {
 		if err != nil {
 			panic("invalid confidential entitlement JWKS: " + err.Error())
 		}
-		meterSigner, err := meter.NewSigner(s.cfg.MeterSigningSeed)
-		if err != nil {
-			panic("invalid confidential meter signer: " + err.Error())
+		meterSigner := s.meterSigner
+		if meterSigner == nil {
+			panic("confidential mode requires the enclave-generated meter signing key")
 		}
 		replay := &entitlement.UsedStore{Dir: s.cfg.EntitlementReplayDir}
 		replay.StartSweeper(make(chan struct{})) // runs for the process lifetime
@@ -185,7 +234,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/attestation", s.handleAttestation)
 	mux.HandleFunc("/.well-known/adverserial-attestation", s.handleAttestation)
 	mux.HandleFunc("/healthz", s.handleHealthz)
-	api := g.Middleware(proxy.New(upstream, s.logger, s.modelsAugmenter(), tap, s.cfg.UpstreamBearer))
+	mux.HandleFunc(statuszPath, s.handleStatusz)
+	mux.HandleFunc(meterJWKSPath, s.handleMeterJWKS)
+	mux.HandleFunc(keyAttestationPath, s.handleKeyAttestation)
+	api := g.Middleware(proxy.NewWithBearerSource(upstream, s.logger, s.modelsAugmenter(), tap, bearer))
 	if s.cfg.ConfidentialMode {
 		// A panic after dispatch must still settle the reservation (zeros)
 		// instead of leaking it; recovery answers 500.
@@ -249,19 +301,25 @@ func fencedAPIConfidential(next http.Handler) http.Handler {
 // reports the latest state. The gate refuses admission while it is false, so
 // boot and crash windows never consume a single-use entitlement (the client
 // gets a clean 503 and retries instead of a burned 502).
-func upstreamReadyProbe(upstream *url.URL, bearer string) func() bool {
+func upstreamReadyProbe(upstream *url.URL, bearer func() string) func() bool {
 	var ready atomic.Bool
 	health := *upstream
 	health.Path = "/health"
 	health.RawQuery = ""
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	// Direct connection only, like the reverse proxy: the upstream may be a
+	// service name on the VM-internal network, which the default transport
+	// would hand (with the credential) to any HTTP_PROXY in the environment.
+	client := &http.Client{
+		Timeout:   1500 * time.Millisecond,
+		Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
+	}
 	go func() {
 		for {
 			ok := false
 			req, err := http.NewRequest(http.MethodGet, health.String(), nil)
 			if err == nil {
-				if bearer != "" {
-					req.Header.Set("Authorization", "Bearer "+bearer)
+				if secret := bearer(); secret != "" {
+					req.Header.Set("Authorization", "Bearer "+secret)
 				}
 				if resp, err := client.Do(req); err == nil {
 					ok = resp.StatusCode == http.StatusOK
@@ -411,8 +469,14 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
+// isAttestationPath reports the public, unauthenticated evidence routes.
 func isAttestationPath(p string) bool {
-	return p == "/attestation" || p == "/.well-known/adverserial-attestation"
+	switch p {
+	case "/attestation", "/.well-known/adverserial-attestation",
+		keyAttestationPath, meterJWKSPath, statuszPath:
+		return true
+	}
+	return false
 }
 
 // gpuSnapshot returns the current GPU evidence bundle state (zero value when

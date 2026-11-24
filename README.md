@@ -8,10 +8,11 @@ inference deployment. It runs **inside** a Phala dstack confidential VM
    LiveDNS or Cloudflare (production) or an ECDSA P-256 self-signed key
    generated **in process** (dev default; never on disk),
 2. serves nonce-bound TDX attestation evidence plus a signed ES256
-   verification receipt (`GET /attestation`). In confidential mode the
-   receipt key comes from a sealed, stable seed and its public JWK is pinned
-   in the public runtime policy,
-3. reverse-proxies everything else to the loopback inference server, and
+   verification receipt (`GET /attestation`). In confidential mode every
+   private key is generated inside the enclave and none is accepted from
+   configuration (see *Enclave-generated keys*),
+3. reverse-proxies everything else to the inference server inside the same
+   VM, and
 4. never logs request or response content — method, path class, status,
    byte count, and duration only. There is no content-logging escape hatch.
 
@@ -47,14 +48,17 @@ docker run --rm -p 8443:8443 \
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:8443` | TLS listen address |
-| `UPSTREAM` | `http://127.0.0.1:30000` | Inference server (loopback only) |
-| `UPSTREAM_BEARER_TOKEN` | _(empty)_ | Sealed SGLang-only credential. Required in `CONFIDENTIAL_MODE`; replaces the client entitlement before the upstream request. |
+| `UPSTREAM` | `http://127.0.0.1:30000` | Inference server. In `CONFIDENTIAL_MODE` it must be a loopback address, or `http://<name>:<port>` where `<name>` is a single-label service name (`^[a-z][a-z0-9-]{0,62}$`, no dots) on the VM-internal Docker network with an explicit port, e.g. `http://sglang:30000`. Anything else is refused. |
+| `UPSTREAM_BEARER_TOKEN_FILE` | _(empty)_ | File holding the SGLang-only credential (`^[A-Za-z0-9_-]{32,128}$`, one optional trailing newline). Required in `CONFIDENTIAL_MODE`. Written on every VM boot by a one-shot init container into a volume shared with the model runtime. Startup waits up to 120 s for a valid file; it is re-read when its mtime or size changes (checked at most once per second). It replaces the client entitlement before the upstream request and is never logged. |
+| `UPSTREAM_BEARER_TOKEN` | _(empty)_ | Development only: the same credential from the environment. **Refused in `CONFIDENTIAL_MODE`**; mutually exclusive with `UPSTREAM_BEARER_TOKEN_FILE`. |
+| `ENCLAVE_KEY_DIR` | _(empty)_ | Absolute directory on the encrypted state volume (e.g. `/state/keys`) for the enclave-generated receipt and meter signing keys. Required in `CONFIDENTIAL_MODE`. |
+| `INFERENCE_STATUS_FILE` | _(empty)_ | Optional JSON progress file written by the model runtime's launcher; a whitelisted, sanitized copy is served under `inference` at `/statusz`. |
 | `MODEL_ID` | `lordx64/cyberglm` | Served model ID (receipt claim `model_id`) |
 | `POLICY_ID` | `adverserial-policy/dev` | Policy identifier from the public policy registry |
 | `ENDPOINT` | `https://api.adverserial.ai` | Public base URL (receipt claim `endpoint`) |
 | `RECEIPT_ISSUER` | `https://verify.adverserial.ai` | Receipt claim `iss` |
 | `RECEIPT_AUDIENCE` | `https://chat.adverserial.ai` | Receipt claim `aud` |
-| `RECEIPT_SIGNING_SEED` | _(empty)_ | Sealed 32-byte base64url seed for the stable P-256 receipt signer. Required in `CONFIDENTIAL_MODE`; publish only the derived public JWK in the active policy. |
+| `RECEIPT_SIGNING_SEED` | _(empty)_ | Development only: 32-byte base64url seed for a deterministic P-256 receipt signer. **Refused in `CONFIDENTIAL_MODE`.** |
 | `COMPOSE_DIGEST` | _(empty)_ | `sha256:` digest of the dstack compose config |
 | `MODEL_DIGEST` | _(empty)_ | `sha256:` digest of the model artifact |
 | `RUNTIME_DIGEST` | _(empty)_ | Expected runtime measurement digest |
@@ -82,7 +86,9 @@ docker run --rm -p 8443:8443 \
 | `ENTITLEMENT_ISSUER` | `https://billing.adverserial.ai` | Required entitlement issuer. |
 | `ENTITLEMENT_AUDIENCE` | `https://api.adverserial.ai` | Required entitlement audience. |
 | `ENTITLEMENT_REPLAY_DIR` | — | Persistent, private directory for atomically consuming one-use entitlement IDs. |
-| `METER_SIGNING_SEED` | — | Sealed 32-byte base64url Ed25519 seed for count-only meter records. Never commit it. |
+| `METER_SIGNING_SEED` | — | Removed in rc.31. **Refused in `CONFIDENTIAL_MODE`**: the meter key is generated in the enclave and published at `/.well-known/adverserial-meter-jwks.json`. |
+| `EHBP_REQUIRED` | `0` | Require EHBP-encrypted request bodies. Mandatory in `CONFIDENTIAL_MODE`. The HPKE receiver identity is generated in memory on every boot. |
+| `EHBP_IDENTITY_B64` | — | Removed in rc.31. **Refused in `CONFIDENTIAL_MODE`.** |
 | `METER_ISSUER` | `https://api.adverserial.ai` | Meter-event issuer. |
 | `METER_AUDIENCE` | `https://billing.adverserial.ai` | Meter-event audience. |
 | `METER_OUTBOX_DIR` | — | Persistent, private directory for signed meter retry records. |
@@ -151,7 +157,7 @@ Evidence object (actual `DEV_MODE=1` output, keys as served):
     "model_digest": "sha256:…",
     "model_id": "lordx64/cyberglm",
     "policy_id": "adverserial-policy/dev",
-    "proxy_version": "0.1.0"
+    "proxy_version": "v0.1.0-rc.31"
   }
 }
 ```
@@ -223,9 +229,9 @@ is pinned against a TS-generated test vector in
 ### Everything else → upstream
 
 All other paths are reverse-proxied to `UPSTREAM` with a 100 ms flush
-interval (SSE responses stream; nothing is buffered). `Authorization` and all
-other headers pass through unchanged. One exception: `GET /v1/models` is
-augmented, see below.
+interval (SSE responses stream; nothing is buffered). Headers pass through
+unchanged, except that a configured upstream credential always replaces
+`Authorization`. One exception: `GET /v1/models` is augmented, see below.
 
 ### `GET /v1/models` augmentation (browser-direct chat)
 
@@ -348,6 +354,187 @@ The ingress must be outside the CVM and its TLS session must reach that
 process un-terminated; an L7 CDN, Heroku dyno, or TLS-terminating proxy cannot
 authenticate the CVM client certificate. mTLS is network-origin defense in
 depth and does not replace signed-event verification at billing.
+
+### Enclave-generated keys
+
+In `CONFIDENTIAL_MODE` no private key crosses the VM boundary in either
+direction:
+
+| Key | Created | Lifetime | Storage |
+| --- | --- | --- | --- |
+| Receipt signing key (ECDSA P-256) | first boot, `crypto/rand` | until `ENCLAVE_KEY_DIR` is destroyed | `receipt-p256.pem`, PKCS#8 PEM |
+| Meter signing key (Ed25519) | first boot, `crypto/rand` | until `ENCLAVE_KEY_DIR` is destroyed | `meter-ed25519.pem`, PKCS#8 PEM |
+| EHBP / HPKE receiver identity (X25519) | every boot | one process lifetime | memory only |
+| Prefix-cache salt key (32 bytes) | every boot | one process lifetime | memory only |
+| TLS key | ACME issuance or self-signed | see *TLS certificates* | `CERT_DIR` or memory |
+
+`ENCLAVE_KEY_DIR` is created with mode `0700`; each key file is written with
+mode `0600` through a temporary file in the same directory, `fsync`, an
+atomic no-replace link into place, and a directory `fsync`. On later boots
+the files are loaded. The proxy **fails closed** and never regenerates over
+an existing file when the directory or a file is group/world-accessible, is
+not a regular file (symlinks are refused), or does not parse as a single
+PKCS#8 block of the expected key type. Recovery from such a state is a
+deliberate operator action: remove the file, restart, and re-pin the new
+public key everywhere it is trusted. Mount the state volume at the parent
+(e.g. `/state`, owned by uid 65532 in the image) and let the proxy create
+the key directory; a volume mounted directly at `ENCLAVE_KEY_DIR` with mode
+`0755` is refused.
+
+The proxy refuses to start in `CONFIDENTIAL_MODE` when any of
+`RECEIPT_SIGNING_SEED`, `METER_SIGNING_SEED`, `EHBP_IDENTITY_B64`, or
+`UPSTREAM_BEARER_TOKEN` is set to a non-empty value. The error names the
+variable and never its value.
+
+Consequences for relying parties:
+
+- The receipt and meter public keys are new on the first rc.31 boot and
+  change again only if the key directory is lost. Verifiers and billing must
+  pin them from quote-bound evidence (below), not from operator-supplied
+  configuration.
+- The EHBP public key changes on **every** proxy restart, and with it
+  `attestation_state_digest`. Clients must fetch the EHBP key from fresh
+  `/attestation` evidence after a restart; a cached key configuration fails
+  decryption with a key-configuration error.
+
+### `GET /.well-known/adverserial-meter-jwks.json`
+
+Unauthenticated. Returns the meter verification key as a JWK set:
+
+```json
+{"keys":[{"kty":"OKP","crv":"Ed25519","x":"<base64url>","kid":"<base64url SHA-256 of the raw public key>","use":"sig","alg":"EdDSA"}]}
+```
+
+`kid` is the `kid` header of every `/cc/start` and `/cc/meter` JWS. The set
+is empty outside confidential mode. A JWKS fetched over TLS proves only that
+the TLS endpoint served it; billing must check the key attestation before
+pinning the key.
+
+### `GET /.well-known/adverserial-key-attestation`
+
+Unauthenticated. `GET /attestation` already binds the TLS, receipt, and EHBP
+public keys into a nonce-fresh quote (its `report_data` format and evidence
+fields are unchanged). This additive route binds **all** enclave keys,
+including the meter key, and the claim that they were generated in the
+enclave:
+
+```json
+{
+  "statement": "{\"ehbp_public_key\":\"…\",…}",
+  "quote": "<hex TDX quote>",
+  "event_log": [ … ]
+}
+```
+
+`statement` is a string holding canonical JSON (sorted keys, no whitespace,
+the same encoding as the evidence digest):
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `adverserial-key-attestation/v1` |
+| `issued_at` | RFC 3339 UTC time the statement was built |
+| `proxy_version` | proxy build version |
+| `keys_origin` | `enclave-generated` in confidential mode (`operator-seed` or `process-ephemeral` otherwise) |
+| `receipt_pubkey_jwk` | receipt signing public JWK (P-256, `kid` = RFC 7638 thumbprint) |
+| `meter_pubkey_jwk` | meter signing public JWK (Ed25519), or `null` |
+| `ehbp_public_key` / `ehbp_public_key_sha256` | raw X25519 receiver key (base64url) and `sha256:<base64url>` of it, or `null` |
+| `tls_spki_sha256` | `sha256:<base64url>` of the active serving certificate's SPKI |
+| `dev` | present and `true` only for synthetic `DEV_MODE` evidence |
+
+The quote's 64-byte `report_data` is
+
+```
+SHA-512("adverserial-key-attestation-v1\n" || statement_bytes)
+```
+
+The result is cached for 60 seconds per serving certificate, and generation
+is single-flight, so the route cannot be used to exhaust quote generation.
+The statement carries no caller nonce: freshness is `issued_at` plus the
+60-second cache, which is what a pinning decision needs. Use
+`/attestation?nonce=…` when per-request freshness is required.
+
+**Verification recipe** (billing before pinning the meter key; any verifier
+before trusting a receipt key):
+
+1. Connect to the endpoint over TLS and record the SHA-256 of the peer
+   certificate's SubjectPublicKeyInfo.
+2. `GET /.well-known/adverserial-key-attestation`. Take `statement` exactly
+   as the JSON string decodes — do not re-serialize it.
+3. Verify the TDX quote signature and certificate chain against Intel's
+   root with a DCAP verifier, and check TCB status against policy.
+4. Replay `event_log` against the quote's RTMRs and check the measured
+   compose hash and image digests against the published policy for this
+   release. This is the step that proves the keys below belong to *this*
+   software; without it the quote proves only that some TDX guest made it.
+5. Compute `SHA-512("adverserial-key-attestation-v1\n" || statement)` over
+   the UTF-8 bytes and require it to equal the quote's `report_data`
+   (all 64 bytes).
+6. Parse `statement` and require `type` =
+   `adverserial-key-attestation/v1`, `keys_origin` = `enclave-generated`,
+   no `dev` member, `issued_at` within your freshness window (a few
+   minutes), and `tls_spki_sha256` equal to the value from step 1.
+7. Only then pin `meter_pubkey_jwk` (billing) or `receipt_pubkey_jwk`
+   (clients), and require `kid` to match the JWS headers you verify. Repeat
+   the procedure when a JWS arrives under an unknown `kid`.
+
+### `GET /statusz`
+
+Unauthenticated operational status. It carries public key identifiers and
+counters only — no secrets and nothing derived from a request:
+
+```json
+{
+  "version": "v0.1.0-rc.31",
+  "started_at": "2026-11-24T10:00:00Z",
+  "keys_origin": "enclave-generated",
+  "receipt_kid": "<RFC 7638 thumbprint of the receipt key>",
+  "meter_kid": "<meter JWS kid>",
+  "meter_jwk_thumbprint": "<RFC 7638 thumbprint of the meter key>",
+  "ehbp_public_key_sha256": "sha256:<base64url>",
+  "upstream_ready": true,
+  "ingress": {"in_use": 0, "max": 48},
+  "inference": {"ladder_id": "…", "rung": "…", "phase": "…", "attempt": "…",
+                "started_at": "…", "updated_at": "…", "detail": "…"}
+}
+```
+
+`meter_kid`, `meter_jwk_thumbprint`, `ehbp_public_key_sha256`, and
+`upstream_ready` are `null` when not applicable (outside confidential mode).
+`inference` appears only when `INFERENCE_STATUS_FILE` is set and holds a JSON
+object of at most 8 KiB. Only the seven fields shown are copied; each present,
+non-null value is rendered as a string of at most 200 characters with every
+character outside `[A-Za-z0-9 _.:,=/+-]` replaced by `?`. `/statusz` values
+are unauthenticated hints for operators; trust decisions use the quote-bound
+routes.
+
+### Tenant cache isolation
+
+SGLang keys its radix prefix cache on the per-request `cache_salt` and
+`extra_key` fields, and a cache hit is observable through latency and
+`cached_tokens`. In confidential mode the proxy owns both fields on
+`POST /v1/chat/completions` and `POST /v1/responses`:
+
+- a client-supplied `extra_key` is rejected with 400;
+- a client `cache_salt` is optional; when present it must be a string
+  matching `^[A-Za-z0-9_-]{32,128}$`, otherwise 400;
+- the forwarded `cache_salt` is **always** replaced by
+  `base64url-nopad(HMAC-SHA256(k, tenant_id || 0x00 || client_salt))`, where
+  `k` is 32 random bytes drawn at process start (memory only) and
+  `client_salt` is empty when the client sent none.
+
+`tenant_id` comes from the billing-signed entitlement, so a client cannot
+choose it: `"sub:" + sub` when the entitlement carries the optional `sub`
+claim, otherwise `"jti:" + jti`. `sub` must be an opaque, stable,
+per-account identifier matching `^[A-Za-z0-9_.:-]{1,128}$` (never an email,
+name, or API key); it is used only as HMAC input and is never logged,
+metered, or forwarded. Because `jti` is single-use, **an entitlement without
+`sub` is isolated from every other request and never hits the prefix cache**.
+Same tenant and same client salt share cache entries; different tenants never
+can, whatever salt they send. Validation happens before the entitlement is
+consumed, and the rewrite touches only the upstream-bound body: the receipt
+still hashes, and the entitlement input bound still measures, the client's
+original bytes. The cache partition does not survive a proxy restart (new
+`k`).
 
 ### Legacy counts-only usage tap
 
@@ -475,9 +662,15 @@ bodies (the final SSE `usage` chunk), which this proxy never inspects.
   them (or accepts `receipt_verified=False` silently) gets no route proof.
   Receipts cover the response body; they do not cover upstream HTTP headers.
 - Key continuity across restarts: the ACME account key and certificates
-  persist on the dstack volume via `CERT_DIR`, but the **receipt** key and the
-  self-signed dev TLS key are ephemeral per process boot until KMS sealing
-  lands.
+  persist on the dstack volume via `CERT_DIR`, and in confidential mode the
+  receipt and meter keys persist under `ENCLAVE_KEY_DIR`. Their
+  confidentiality at rest is that of the CVM's encrypted state volume; they
+  are not additionally sealed to an RTMR policy. The EHBP identity and the
+  self-signed dev TLS key are ephemeral per process boot.
+- Externally provisioned material that remains: the meter-ingress mTLS client
+  key (`METER_TLS_BUNDLE_B64` / `METER_CLIENT_KEY_FILE`), the direct-signed
+  ingress capability, and the ACME DNS credentials. None of them signs
+  receipts or meter events or decrypts request bodies.
 
 **Content boundary:** prompts, completions, attachments, and chat history
 exist only inside the CVM (proxy memory + inference server). The proxy's logs
@@ -495,8 +688,8 @@ exists for client-integration development and is always marked `"dev": true`.
 
 ## TODOs (deliberately not in v0)
 
-- **KMS sealing** of the receipt signing key (and self-signed dev TLS key)
-  via dstack `/GetKey` (WP-2/WP-4).
+- **KMS sealing** of the enclave-generated receipt and meter keys to an RTMR
+  policy via dstack `/GetKey` (WP-2/WP-4).
 - **GPU evidence freshness tightening**: the collector refreshes every 5 min
   and the proxy flags staleness past 30 min; policy-side min-freshness
   enforcement and per-request GPU binding remain WP-3 exit-criteria work.
@@ -515,12 +708,14 @@ internal/attestation/    evidence building, report_data, GPU bundle cache, dstac
 internal/billing/        billing service client (auth check + usage write)
 internal/canonjson/      TS-identical canonical JSON + digest
 internal/config/         env configuration
+internal/enclavekeys/    enclave-generated receipt + meter keys (PKCS#8, fail-closed store)
 internal/entitlement/    billing JWS verification + durable one-use replay store
-internal/gate/           /v1/ auth gate + request attribution extraction
+internal/gate/           /v1/ auth gate, request attribution, tenant cache-salt binding
 internal/meter/          signed count-only meter JWS + durable retry outbox
 internal/proxy/          reverse proxy, /v1/models augmenter, usage tap, no-content logging
 internal/receipt/        ES256 JWS minting, JWK, RFC 7638 thumbprints
-internal/server/         TLS + hot-swap holder, routing, chat vhost, attestation handler
+internal/server/         TLS + hot-swap holder, routing, chat vhost, attestation, key attestation, statusz
+internal/upstreamtoken/  file-backed upstream credential with change detection
 internal/buildinfo/      proxy version (ldflags-overridable)
 ```
 
@@ -538,17 +733,9 @@ derivation. Adverserial binds the receiver public key configuration into its
 fresh attestation evidence before a client uses it; clients must not replace it
 with an independently fetched key.
 
-Generate the deployment-specific receiver identity only on an administrator
-workstation, writing it directly into protected storage:
-
-```sh
-go run ./cmd/generate-ehbp-identity --out "$HOME/.config/adverserial/ehbp-identity"
-chmod 600 "$HOME/.config/adverserial/ehbp-identity"
-```
-
-Copy the single file value into sealed `EHBP_IDENTITY_B64`; never commit or
-print it. The proxy publishes only its RFC 9458 public key configuration in
-fresh quote-bound evidence.
+The receiver identity is generated inside the enclave on every boot and held
+in memory only; there is no way to provision one. The proxy publishes only
+its RFC 9458 public key configuration in fresh quote-bound evidence.
 
 ## License
 

@@ -22,12 +22,22 @@ var sha256Digest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 type Config struct {
 	ListenAddr     string // LISTEN_ADDR, default :8443
 	Upstream       string // UPSTREAM, default http://127.0.0.1:30000
-	UpstreamBearer string // UPSTREAM_BEARER_TOKEN — loopback inference credential
-	ModelID        string // MODEL_ID, default lordx64/cyberglm
-	PolicyID       string // POLICY_ID
-	Endpoint       string // ENDPOINT — public base URL, echoed into receipt claims
-	ComposeDigest  string // COMPOSE_DIGEST — sha256 of the dstack compose file
-	ModelDigest    string // MODEL_DIGEST — sha256 of the model artifact
+	UpstreamBearer string // UPSTREAM_BEARER_TOKEN — inference credential; refused in CONFIDENTIAL_MODE
+	// UpstreamBearerFile is the per-boot inference credential written by a
+	// one-shot init container into a volume shared with the model runtime.
+	// Required in CONFIDENTIAL_MODE; the proxy re-reads it when it changes.
+	UpstreamBearerFile string // UPSTREAM_BEARER_TOKEN_FILE
+	// EnclaveKeyDir holds the receipt and meter signing keys generated inside
+	// the CVM on first boot. Required in CONFIDENTIAL_MODE.
+	EnclaveKeyDir string // ENCLAVE_KEY_DIR, e.g. /state/keys
+	// InferenceStatusFile is an optional JSON progress file written by the
+	// model runtime's launcher; a whitelisted copy is served at /statusz.
+	InferenceStatusFile string // INFERENCE_STATUS_FILE
+	ModelID             string // MODEL_ID, default lordx64/cyberglm
+	PolicyID            string // POLICY_ID
+	Endpoint            string // ENDPOINT — public base URL, echoed into receipt claims
+	ComposeDigest       string // COMPOSE_DIGEST — sha256 of the dstack compose file
+	ModelDigest         string // MODEL_DIGEST — sha256 of the model artifact
 	// ModelManifestFile is written by the isolated read-only model measurer.
 	// When set, its validated digest becomes ModelDigest before the proxy starts.
 	ModelManifestFile string // MODEL_MANIFEST_FILE
@@ -35,8 +45,9 @@ type Config struct {
 
 	ReceiptIssuer   string // RECEIPT_ISSUER   → receipt claim iss
 	ReceiptAudience string // RECEIPT_AUDIENCE → receipt claim aud
-	// ReceiptSigningSeed is a sealed 32-byte base64url seed for the stable
-	// P-256 receipt key. Its public JWK is pinned in the public policy.
+	// ReceiptSigningSeed is a 32-byte base64url seed for a deterministic P-256
+	// receipt key. Development only: CONFIDENTIAL_MODE refuses it, because a
+	// key supplied from outside the CVM is known to whoever supplied it.
 	ReceiptSigningSeed string // RECEIPT_SIGNING_SEED
 
 	DstackSocket string // DSTACK_SOCKET, default /var/run/dstack.sock
@@ -104,7 +115,6 @@ type Config struct {
 	EntitlementIssuer      string // ENTITLEMENT_ISSUER
 	EntitlementAudience    string // ENTITLEMENT_AUDIENCE
 	EntitlementReplayDir   string // ENTITLEMENT_REPLAY_DIR — persistent volume
-	MeterSigningSeed       string // METER_SIGNING_SEED — sealed Ed25519 seed
 	MeterIssuer            string // METER_ISSUER
 	MeterAudience          string // METER_AUDIENCE
 	MeterOutboxDir         string // METER_OUTBOX_DIR — persistent volume
@@ -136,11 +146,9 @@ type Config struct {
 	GPUEvidenceFile string // GPU_EVIDENCE_FILE, default /data/gpu-evidence.json
 
 	// EHBPRequired requires the standards-based EHBP encrypted-body transport
-	// for inference. EHBPIdentityB64 is a sealed base64url JSON identity from
-	// the MIT-licensed reference implementation; only attest-proxy in the CVM
-	// receives its private component.
-	EHBPRequired    bool   // EHBP_REQUIRED
-	EHBPIdentityB64 string // EHBP_IDENTITY_B64
+	// for inference. The HPKE receiver identity is generated in process memory
+	// on every boot and is never written to disk or accepted from outside.
+	EHBPRequired bool // EHBP_REQUIRED
 }
 
 // FromEnv reads configuration using getenv (pass os.Getenv in production).
@@ -149,6 +157,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("LISTEN_ADDR"), ":8443"),
 		Upstream:           orDefault(getenv("UPSTREAM"), "http://127.0.0.1:30000"),
 		UpstreamBearer:     getenv("UPSTREAM_BEARER_TOKEN"),
+		UpstreamBearerFile: getenv("UPSTREAM_BEARER_TOKEN_FILE"),
+		EnclaveKeyDir:      getenv("ENCLAVE_KEY_DIR"),
 		ModelID:            orDefault(getenv("MODEL_ID"), "lordx64/cyberglm"),
 		PolicyID:           orDefault(getenv("POLICY_ID"), "adverserial-policy/dev"),
 		Endpoint:           orDefault(getenv("ENDPOINT"), "https://api.adverserial.ai"),
@@ -181,7 +191,6 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		EntitlementIssuer:      orDefault(getenv("ENTITLEMENT_ISSUER"), "https://billing.adverserial.ai"),
 		EntitlementAudience:    orDefault(getenv("ENTITLEMENT_AUDIENCE"), "https://api.adverserial.ai"),
 		EntitlementReplayDir:   getenv("ENTITLEMENT_REPLAY_DIR"),
-		MeterSigningSeed:       getenv("METER_SIGNING_SEED"),
 		MeterIssuer:            orDefault(getenv("METER_ISSUER"), "https://api.adverserial.ai"),
 		MeterAudience:          orDefault(getenv("METER_AUDIENCE"), "https://billing.adverserial.ai"),
 		MeterOutboxDir:         getenv("METER_OUTBOX_DIR"),
@@ -195,7 +204,7 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		ChatHost:               strings.ToLower(getenv("CHAT_HOST")),
 		ChatDocroot:            getenv("CHAT_DOCROOT"),
 		GPUEvidenceFile:        orDefault(getenv("GPU_EVIDENCE_FILE"), "/data/gpu-evidence.json"),
-		EHBPIdentityB64:        strings.TrimSpace(getenv("EHBP_IDENTITY_B64")),
+		InferenceStatusFile:    getenv("INFERENCE_STATUS_FILE"),
 	}
 
 	authRequired, err := parseBoolDefault(getenv("AUTH_REQUIRED"), true)
@@ -226,6 +235,15 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		if !cfg.EHBPRequired {
 			return Config{}, fmt.Errorf("EHBP_REQUIRED must be enabled in CONFIDENTIAL_MODE; plaintext request bodies must never reach the model")
 		}
+		// Every private key is generated inside the CVM. A key or credential
+		// delivered through the environment is known to whoever configured the
+		// deployment, so its presence is a refusal, not a fallback. The error
+		// names the variable and never echoes its value.
+		for _, name := range ExternalSecretEnv {
+			if strings.TrimSpace(getenv(name)) != "" {
+				return Config{}, fmt.Errorf("%s must not be set in CONFIDENTIAL_MODE: keys are generated inside the enclave and the upstream credential is read from UPSTREAM_BEARER_TOKEN_FILE", name)
+			}
+		}
 		if len(cfg.AttestedModels) == 0 {
 			// An empty filter would attest every model the upstream lists;
 			// confidential mode attests exactly the configured model.
@@ -237,11 +255,10 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		for _, required := range []struct{ name, value string }{
 			{"ENTITLEMENT_JWKS_JSON", cfg.EntitlementJWKS},
 			{"ENTITLEMENT_REPLAY_DIR", cfg.EntitlementReplayDir},
-			{"METER_SIGNING_SEED", cfg.MeterSigningSeed},
 			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
 			{"METER_URL", cfg.MeterURL},
-			{"UPSTREAM_BEARER_TOKEN", cfg.UpstreamBearer},
-			{"RECEIPT_SIGNING_SEED", cfg.ReceiptSigningSeed},
+			{"ENCLAVE_KEY_DIR", cfg.EnclaveKeyDir},
+			{"UPSTREAM_BEARER_TOKEN_FILE", cfg.UpstreamBearerFile},
 		} {
 			if strings.TrimSpace(required.value) == "" {
 				return Config{}, fmt.Errorf("%s is required when CONFIDENTIAL_MODE is enabled", required.name)
@@ -250,16 +267,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		for _, dir := range []struct{ name, value string }{
 			{"ENTITLEMENT_REPLAY_DIR", cfg.EntitlementReplayDir},
 			{"METER_OUTBOX_DIR", cfg.MeterOutboxDir},
+			{"ENCLAVE_KEY_DIR", cfg.EnclaveKeyDir},
 		} {
 			if !filepath.IsAbs(dir.value) {
 				return Config{}, fmt.Errorf("%s must be an absolute path on the persistent state volume", dir.name)
 			}
 		}
+		if !filepath.IsAbs(cfg.UpstreamBearerFile) {
+			return Config{}, fmt.Errorf("UPSTREAM_BEARER_TOKEN_FILE must be an absolute path")
+		}
+		if cfg.EnclaveKeyDir == cfg.EntitlementReplayDir || cfg.EnclaveKeyDir == cfg.MeterOutboxDir {
+			return Config{}, fmt.Errorf("ENCLAVE_KEY_DIR must not be shared with ENTITLEMENT_REPLAY_DIR or METER_OUTBOX_DIR")
+		}
 		if cfg.EntitlementReplayDir == cfg.MeterOutboxDir {
 			return Config{}, fmt.Errorf("ENTITLEMENT_REPLAY_DIR and METER_OUTBOX_DIR must be different directories")
-		}
-		if cfg.EHBPRequired && cfg.EHBPIdentityB64 == "" {
-			return Config{}, fmt.Errorf("EHBP_IDENTITY_B64 is required when EHBP_REQUIRED is enabled")
 		}
 		meterURL, err := url.Parse(cfg.MeterURL)
 		if err != nil || meterURL.Scheme != "https" || meterURL.Host == "" || meterURL.User != nil || meterURL.RawQuery != "" || meterURL.Fragment != "" || (meterURL.Path != "" && meterURL.Path != "/") {
@@ -305,6 +326,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("CONFIDENTIAL_ACTIVATION must be pre-activation or active")
 		}
 	}
+	if strings.TrimSpace(cfg.UpstreamBearer) != "" && cfg.UpstreamBearerFile != "" {
+		return Config{}, fmt.Errorf("UPSTREAM_BEARER_TOKEN and UPSTREAM_BEARER_TOKEN_FILE are mutually exclusive")
+	}
 	if (cfg.ChatHost == "") != (cfg.ChatDocroot == "") {
 		return Config{}, fmt.Errorf("CHAT_HOST and CHAT_DOCROOT must be set together")
 	}
@@ -346,10 +370,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return Config{}, fmt.Errorf("UPSTREAM must be a bare http(s)://host URL with no userinfo, path, query, or fragment")
 	}
-	if cfg.ConfidentialMode {
-		if h := u.Hostname(); h != "127.0.0.1" && h != "localhost" && h != "::1" {
-			return Config{}, fmt.Errorf("UPSTREAM must be a loopback address in CONFIDENTIAL_MODE")
-		}
+	if cfg.ConfidentialMode && !confidentialUpstreamAllowed(u) {
+		return Config{}, fmt.Errorf("UPSTREAM must be a loopback address or http://<single-label-service>:<port> on the VM-internal network in CONFIDENTIAL_MODE")
 	}
 	if cfg.ChatHost != "" {
 		if eu, err := url.Parse(cfg.Endpoint); err == nil && strings.EqualFold(eu.Hostname(), cfg.ChatHost) {
@@ -396,6 +418,35 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// ExternalSecretEnv lists the variables CONFIDENTIAL_MODE refuses to start
+// with: each one would hand the deployment a private key or credential that
+// exists outside the CVM.
+var ExternalSecretEnv = []string{
+	"RECEIPT_SIGNING_SEED",
+	"METER_SIGNING_SEED",
+	"EHBP_IDENTITY_B64",
+	"UPSTREAM_BEARER_TOKEN",
+}
+
+// internalServiceName is a single DNS label: a Docker service name on the
+// compose network inside the same VM. It contains no dot, so it is resolved
+// by the embedded Docker DNS and cannot name a host outside the VM.
+var internalServiceName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+// confidentialUpstreamAllowed accepts the two shapes plaintext prompts may be
+// forwarded to: a loopback address, or an http service on the VM-internal
+// Docker network addressed by single-label name with an explicit port. The
+// host is compared exactly as configured, so "SGLang" or "sglang." are
+// refused rather than normalized.
+func confidentialUpstreamAllowed(u *url.URL) bool {
+	switch h := u.Hostname(); h {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return u.Scheme == "http" && u.Port() != "" && internalServiceName.MatchString(h)
+	}
 }
 
 // ResolveModelManifest validates the one-time artifact measurement produced by

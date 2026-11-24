@@ -12,7 +12,7 @@ WORKDIR /src
 
 # Injected by the release workflow as the git tag; attestation evidence
 # reports it as workload.proxy_version.
-ARG VERSION=0.1.0
+ARG VERSION=v0.1.0-rc.31
 
 # EHBP is the pinned MIT-licensed reference implementation used by the
 # browser, SDK and proxy; copy both module files for deterministic builds.

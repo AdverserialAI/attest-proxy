@@ -21,6 +21,7 @@ import (
 	"github.com/adverserial/attest-proxy/internal/attestation"
 	"github.com/adverserial/attest-proxy/internal/canonjson"
 	"github.com/adverserial/attest-proxy/internal/config"
+	"github.com/adverserial/attest-proxy/internal/meter"
 	"github.com/adverserial/attest-proxy/internal/receipt"
 	ehbpclient "github.com/tinfoilsh/encrypted-http-body-protocol/client"
 	ehbpidentity "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
@@ -45,6 +46,13 @@ func newTestServer(t *testing.T, cfg config.Config, ehbpIdentity ...*ehbpidentit
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := New(cfg, logger, attestation.DevQuoteSource{}, signer, holder, ehbpIdentity...)
 	srv.now = func() time.Time { return time.Unix(1759999000, 0) }
+	if cfg.ConfidentialMode {
+		meterSigner, err := meter.NewTestSigner()
+		if err != nil {
+			t.Fatalf("NewTestSigner: %v", err)
+		}
+		srv.Configure(Options{MeterSigner: meterSigner, KeysOrigin: "enclave-generated"})
+	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return srv, ts

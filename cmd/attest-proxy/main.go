@@ -1,12 +1,13 @@
 // attest-proxy terminates TLS inside a Phala dstack confidential VM in front
 // of the inference server, serves nonce-bound TDX attestation evidence with a
 // signed ES256 verification receipt, and reverse-proxies everything else to
-// the loopback model runtime. It never logs request or response content.
+// the model runtime inside the same VM. It never logs request or response
+// content. In confidential mode every private key is generated inside the
+// enclave; none is accepted from configuration.
 package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,10 +24,17 @@ import (
 	"github.com/adverserial/attest-proxy/internal/billing"
 	"github.com/adverserial/attest-proxy/internal/buildinfo"
 	"github.com/adverserial/attest-proxy/internal/config"
+	"github.com/adverserial/attest-proxy/internal/enclavekeys"
+	"github.com/adverserial/attest-proxy/internal/meter"
 	"github.com/adverserial/attest-proxy/internal/receipt"
 	"github.com/adverserial/attest-proxy/internal/server"
+	"github.com/adverserial/attest-proxy/internal/upstreamtoken"
 	ehbpidentity "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
+
+// upstreamTokenWait is how long startup waits for the init container to write
+// the per-boot upstream credential.
+const upstreamTokenWait = 120 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -47,16 +55,34 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// Confidential deployments use a stable key from sealed configuration. Its
-	// public JWK is pinned in the public policy, while every fresh TDX quote
-	// binds that key to the active TLS certificate and workload. Development
-	// keeps the short-lived in-memory key so it cannot be mistaken for a
-	// production trust root.
+	// Confidential deployments generate the receipt and meter signing keys
+	// inside the CVM on first boot and reload them from the encrypted state
+	// volume afterwards; config validation has already refused any externally
+	// supplied seed. Verifiers learn the public keys from quote-bound evidence
+	// (/attestation and the key attestation), never from the operator.
+	// Development keeps a short-lived in-memory key (or an explicit seed) so
+	// it cannot be mistaken for a production trust root.
 	var signer *receipt.Signer
-	if cfg.ReceiptSigningSeed != "" {
+	var opts server.Options
+	switch {
+	case cfg.ConfidentialMode:
+		keys, keyErr := enclavekeys.LoadOrCreate(cfg.EnclaveKeyDir)
+		if keyErr != nil {
+			return fmt.Errorf("ENCLAVE_KEY_DIR: %w", keyErr)
+		}
+		if signer, err = receipt.NewSignerFromKey(keys.Receipt); err != nil {
+			return err
+		}
+		if opts.MeterSigner, err = meter.NewSignerFromKey(keys.Meter); err != nil {
+			return err
+		}
+		opts.KeysOrigin = enclavekeys.Origin
+	case cfg.ReceiptSigningSeed != "":
 		signer, err = receipt.NewSignerFromSeed(cfg.ReceiptSigningSeed)
-	} else {
+		opts.KeysOrigin = "operator-seed"
+	default:
 		signer, err = receipt.NewSigner()
+		opts.KeysOrigin = "process-ephemeral"
 	}
 	if err != nil {
 		return err
@@ -83,19 +109,28 @@ func run(logger *slog.Logger) error {
 		quotes = attestation.NewDstackClient(cfg.DstackSocket)
 	}
 
+	// The HPKE receiver identity lives for one process lifetime: generated
+	// here, held in memory, never written to disk. Each boot's public key is
+	// bound to that boot's quotes, so clients re-verify after a restart.
 	var ehbpReceiver *ehbpidentity.Identity
 	if cfg.EHBPRequired {
-		identityJSON, decodeErr := base64.RawURLEncoding.DecodeString(cfg.EHBPIdentityB64)
-		if decodeErr != nil {
-			return fmt.Errorf("decode EHBP_IDENTITY_B64: %w", decodeErr)
-		}
-		ehbpReceiver, err = ehbpidentity.Import(identityJSON)
+		ehbpReceiver, err = ehbpidentity.NewIdentity()
 		if err != nil {
-			return fmt.Errorf("load EHBP identity: %w", err)
+			return fmt.Errorf("generate EHBP identity: %w", err)
 		}
 	}
 
+	if cfg.UpstreamBearerFile != "" {
+		logger.Info("waiting for upstream credential file", "timeout", upstreamTokenWait.String())
+		token, tokenErr := upstreamtoken.Wait(ctx, cfg.UpstreamBearerFile, upstreamTokenWait)
+		if tokenErr != nil {
+			return tokenErr
+		}
+		opts.UpstreamBearer = token.Token
+	}
+
 	srv := server.New(cfg, logger, quotes, signer, holder, ehbpReceiver)
+	srv.Configure(opts)
 
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddr,
@@ -128,6 +163,8 @@ func run(logger *slog.Logger) error {
 		"acme", len(cfg.ACMEDomains) > 0,
 		"version", buildinfo.Version,
 		"receipt_kid", signer.KeyID(),
+		"meter_kid", meterKeyID(opts.MeterSigner),
+		"keys_origin", opts.KeysOrigin,
 		"tls_spki_sha256", attestation.SPKIHash(holder.Leaf()),
 	)
 
@@ -143,6 +180,13 @@ func run(logger *slog.Logger) error {
 		return nil
 	}
 	return err
+}
+
+func meterKeyID(s *meter.Signer) string {
+	if s == nil {
+		return ""
+	}
+	return s.KeyID()
 }
 
 // setupTLS returns the certificate holder: an ACME DNS-01 certificate via the
