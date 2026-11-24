@@ -154,11 +154,20 @@ func TestTenantCacheSaltCannotBeSteeredByTheClient(t *testing.T) {
 		}
 	}
 
-	// No sub claim: the tenant falls back to the single-use jti.
+	// No sub claim and no client salt: the tenant falls back to the
+	// single-use jti, so nothing is shared.
+	if s.salt("/v1/chat/completions", "", chatBody("")) == s.salt("/v1/chat/completions", "", chatBody("")) {
+		t.Error("requests without a signed subject or client salt share a cache key")
+	}
+	// No sub claim but a client-chosen secret salt: that salt is the
+	// partition, and it never reaches a subject-bound tenant's partition.
 	first := s.salt("/v1/chat/completions", "", withA)
 	second := s.salt("/v1/chat/completions", "", withA)
-	if first == second {
-		t.Error("requests without a signed subject share a cache key")
+	if first != second {
+		t.Error("a client salt without a signed subject must be a stable partition")
+	}
+	if first == victim {
+		t.Error("a client-salt partition reached a subject-bound tenant's partition")
 	}
 	// A subject equal to another entitlement's jti cannot collide with the
 	// jti namespace.
