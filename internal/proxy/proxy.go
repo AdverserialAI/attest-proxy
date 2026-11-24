@@ -1,4 +1,4 @@
-// Package proxy implements the reverse proxy to the loopback inference
+// Package proxy implements the reverse proxy to the VM-internal inference
 // server and the request-logging middleware.
 //
 // Content policy (WP-2 hard requirement): this proxy NEVER logs request or
@@ -26,13 +26,27 @@ import (
 // aug and tap may be nil; aug injects confidential_verification metadata into
 // GET /v1/models, tap extracts usage counts from completion responses.
 func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *UsageTap, upstreamBearer ...string) *httputil.ReverseProxy {
+	var bearer func() string
+	if len(upstreamBearer) > 0 && upstreamBearer[0] != "" {
+		secret := upstreamBearer[0]
+		bearer = func() string { return secret }
+	}
+	return NewWithBearerSource(upstream, logger, aug, tap, bearer)
+}
+
+// NewWithBearerSource is New with the upstream credential read per request
+// from bearer, so a credential regenerated on disk takes effect without a
+// restart. A non-nil source always replaces the client's Authorization
+// header: when it yields no credential the header is removed, so a client
+// entitlement can never be forwarded to the model runtime.
+func NewWithBearerSource(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *UsageTap, bearer func() string) *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(upstream)
 	base := rp.Director
 	rp.Director = func(req *http.Request) {
 		base(req)
 		// The stdlib strips hop-by-hop headers AFTER the director runs, using
 		// the Connection header's nominations: a client naming "Connection:
-		// Authorization" would strip the loopback credential injected below.
+		// Authorization" would strip the upstream credential injected below.
 		// Drop the nominations first so that is impossible.
 		req.Header.Del("Connection")
 		// Client-controlled forwarding headers never reach the model server.
@@ -40,15 +54,18 @@ func New(upstream *url.URL, logger *slog.Logger, aug *ModelsAugmenter, tap *Usag
 		req.Header.Del("X-Forwarded-Host")
 		req.Header.Del("Forwarded")
 	}
-	if len(upstreamBearer) > 0 && upstreamBearer[0] != "" {
+	if bearer != nil {
 		base := rp.Director
-		secret := upstreamBearer[0]
 		rp.Director = func(req *http.Request) {
 			base(req)
 			// A client entitlement is valid only at attest-proxy. SGLang sees
-			// a separate sealed loopback credential, never a customer key or
+			// a separate VM-internal credential, never a customer key or
 			// billing token.
-			req.Header.Set("Authorization", "Bearer "+secret)
+			if secret := bearer(); secret != "" {
+				req.Header.Set("Authorization", "Bearer "+secret)
+			} else {
+				req.Header.Del("Authorization")
+			}
 		}
 	}
 	if tap != nil {

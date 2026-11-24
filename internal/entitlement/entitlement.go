@@ -17,13 +17,23 @@ import (
 var canonicalModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}/[a-z0-9][a-z0-9._-]{0,127}$`)
 var fingerprint = regexp.MustCompile(`^sha256:[A-Za-z0-9_-]{43}$`)
 
+// subject is the accepted shape of the optional opaque tenant identifier.
+var subject = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+
 // Claims is the exact v1 entitlement contract. It deliberately contains no
-// user identity, platform API key, prompt, completion, or billing balance.
+// platform API key, prompt, completion, or billing balance, and no user
+// identity beyond the optional opaque Subject.
 type Claims struct {
-	Issuer          string `json:"iss"`
-	Audience        string `json:"aud"`
-	Type            string `json:"typ"`
-	ID              string `json:"jti"`
+	Issuer   string `json:"iss"`
+	Audience string `json:"aud"`
+	Type     string `json:"typ"`
+	ID       string `json:"jti"`
+	// Subject is an optional, billing-assigned, stable and opaque account
+	// identifier (never an email, name, or API key). It is signed by billing,
+	// so a client cannot choose it. The proxy uses it only as the tenant
+	// input of the prefix-cache salt; it is never logged, metered, or
+	// forwarded.
+	Subject         string `json:"sub,omitempty"`
 	Model           string `json:"model"`
 	MaxInputTokens  int    `json:"max_input_tokens"`
 	MaxOutputTokens int    `json:"max_output_tokens"`
@@ -125,6 +135,9 @@ func (v Validator) Validate(token, requestedModel, expectedSPKI string, requestB
 	if zero.ID == "" || !canonicalModelID.MatchString(zero.Model) || zero.Model != requestedModel || zero.MaxRequests != 1 || zero.MaxInputTokens < 1 || zero.MaxOutputTokens < 1 {
 		return Claims{}, fmt.Errorf("malformed or mismatched entitlement")
 	}
+	if zero.Subject != "" && !subject.MatchString(zero.Subject) {
+		return Claims{}, fmt.Errorf("malformed entitlement subject")
+	}
 	if !fingerprint.MatchString(expectedSPKI) || zero.Confirmation.TLSSPKISHA256 != expectedSPKI {
 		return Claims{}, fmt.Errorf("entitlement TLS channel binding mismatch")
 	}
@@ -132,6 +145,18 @@ func (v Validator) Validate(token, requestedModel, expectedSPKI string, requestB
 		return Claims{}, fmt.Errorf("request exceeds entitlement bounds")
 	}
 	return zero, nil
+}
+
+// TenantID is the cache-isolation identity of the entitlement holder. With a
+// billing-signed sub it is stable per account, so one account's requests can
+// share prefix-cache entries. Without one it falls back to the single-use
+// jti, which isolates every request from every other request: always safe,
+// never a cache hit. The two namespaces are prefixed so they cannot collide.
+func (c Claims) TenantID() string {
+	if c.Subject != "" {
+		return "sub:" + c.Subject
+	}
+	return "jti:" + c.ID
 }
 
 // IDHash returns a filesystem-safe opaque identifier. The actual entitlement

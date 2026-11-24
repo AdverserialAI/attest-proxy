@@ -24,6 +24,7 @@ func hostOnly(host string) string {
 func isAPIRoute(p string) bool {
 	return p == "/attestation" ||
 		p == "/healthz" ||
+		p == statuszPath ||
 		strings.HasPrefix(p, "/.well-known/") ||
 		strings.HasPrefix(p, "/v1/")
 }

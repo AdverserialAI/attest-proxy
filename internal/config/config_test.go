@@ -337,28 +337,25 @@ func TestChatHostValidation(t *testing.T) {
 }
 
 func TestConfidentialModeRequiresIsolatedAuthorization(t *testing.T) {
-	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	base := map[string]string{
-		"CONFIDENTIAL_MODE":      "1",
-		"EHBP_REQUIRED":          "1",
-		"EHBP_IDENTITY_B64":      "dGVzdA==",
-		"AUTH_REQUIRED":          "0",
-		"ENTITLEMENT_JWKS_JSON":  `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
-		"ENTITLEMENT_REPLAY_DIR": "/data/used-entitlements",
-		"METER_SIGNING_SEED":     seed,
-		"METER_OUTBOX_DIR":       "/data/meter-outbox",
-		"METER_URL":              "https://meter-ingress.adverserial.ai",
-		"METER_CLIENT_CERT_FILE": "/state/meter-tls/client.crt",
-		"METER_CLIENT_KEY_FILE":  "/state/meter-tls/client.key",
-		"METER_SERVER_CA_FILE":   "/state/meter-tls/ingress-ca.crt",
-		"UPSTREAM_BEARER_TOKEN":  "local-only-secret",
-		"RECEIPT_SIGNING_SEED":   seed,
-		"MODEL_DIGEST":           "sha256:" + strings.Repeat("a", 64),
+		"CONFIDENTIAL_MODE":          "1",
+		"EHBP_REQUIRED":              "1",
+		"AUTH_REQUIRED":              "0",
+		"ENTITLEMENT_JWKS_JSON":      `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
+		"ENTITLEMENT_REPLAY_DIR":     "/data/used-entitlements",
+		"METER_OUTBOX_DIR":           "/data/meter-outbox",
+		"METER_URL":                  "https://meter-ingress.adverserial.ai",
+		"METER_CLIENT_CERT_FILE":     "/state/meter-tls/client.crt",
+		"METER_CLIENT_KEY_FILE":      "/state/meter-tls/client.key",
+		"METER_SERVER_CA_FILE":       "/state/meter-tls/ingress-ca.crt",
+		"ENCLAVE_KEY_DIR":            "/state/keys",
+		"UPSTREAM_BEARER_TOKEN_FILE": "/run/upstream/token",
+		"MODEL_DIGEST":               "sha256:" + strings.Repeat("a", 64),
 	}
 	if _, err := FromEnv(func(k string) string { return base[k] }); err != nil {
 		t.Fatalf("complete confidential config: %v", err)
 	}
-	for _, missing := range []string{"ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_SIGNING_SEED", "METER_OUTBOX_DIR", "METER_URL", "METER_CLIENT_CERT_FILE", "METER_CLIENT_KEY_FILE", "METER_SERVER_CA_FILE", "UPSTREAM_BEARER_TOKEN", "RECEIPT_SIGNING_SEED"} {
+	for _, missing := range []string{"ENTITLEMENT_JWKS_JSON", "ENTITLEMENT_REPLAY_DIR", "METER_OUTBOX_DIR", "METER_URL", "METER_CLIENT_CERT_FILE", "METER_CLIENT_KEY_FILE", "METER_SERVER_CA_FILE", "ENCLAVE_KEY_DIR", "UPSTREAM_BEARER_TOKEN_FILE"} {
 		env := make(map[string]string, len(base))
 		for k, v := range base {
 			env[k] = v
@@ -406,21 +403,18 @@ func TestResolveModelManifestRejectsMismatchedModel(t *testing.T) {
 }
 
 func TestConfidentialModeDirectSignedMetering(t *testing.T) {
-	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	env := map[string]string{
 		"CONFIDENTIAL_MODE":           "1",
 		"EHBP_REQUIRED":               "1",
-		"EHBP_IDENTITY_B64":           "dGVzdA",
 		"AUTH_REQUIRED":               "0",
 		"ENTITLEMENT_JWKS_JSON":       `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
 		"ENTITLEMENT_REPLAY_DIR":      "/data/used-entitlements",
-		"METER_SIGNING_SEED":          seed,
 		"METER_OUTBOX_DIR":            "/data/meter-outbox",
 		"METER_URL":                   "https://billing.adverserial.ai",
 		"METER_DELIVERY_MODE":         "direct-signed",
 		"METER_INGRESS_SHARED_SECRET": "dedicated-meter-capability",
-		"UPSTREAM_BEARER_TOKEN":       "local-only-secret",
-		"RECEIPT_SIGNING_SEED":        seed,
+		"ENCLAVE_KEY_DIR":             "/state/keys",
+		"UPSTREAM_BEARER_TOKEN_FILE":  "/run/upstream/token",
 		"MODEL_DIGEST":                "sha256:" + strings.Repeat("a", 64),
 	}
 	cfg, err := FromEnv(func(k string) string { return env[k] })
@@ -438,5 +432,120 @@ func TestConfidentialModeDirectSignedMetering(t *testing.T) {
 	env["METER_URL"] = "https://other.example"
 	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
 		t.Fatal("direct-signed config accepted a non-billing destination")
+	}
+}
+
+// confidentialEnv is a complete, valid confidential configuration.
+func confidentialEnv() map[string]string {
+	return map[string]string{
+		"CONFIDENTIAL_MODE":           "1",
+		"EHBP_REQUIRED":               "1",
+		"AUTH_REQUIRED":               "0",
+		"ENTITLEMENT_JWKS_JSON":       `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`,
+		"ENTITLEMENT_REPLAY_DIR":      "/state/used-entitlements",
+		"METER_OUTBOX_DIR":            "/state/meter-outbox",
+		"METER_URL":                   "https://billing.adverserial.ai",
+		"METER_DELIVERY_MODE":         "direct-signed",
+		"METER_INGRESS_SHARED_SECRET": "dedicated-meter-capability",
+		"ENCLAVE_KEY_DIR":             "/state/keys",
+		"UPSTREAM_BEARER_TOKEN_FILE":  "/run/upstream/token",
+		"MODEL_DIGEST":                "sha256:" + strings.Repeat("a", 64),
+	}
+}
+
+func TestConfidentialModeRefusesExternallySuppliedSecrets(t *testing.T) {
+	const marker = "SECRET-VALUE-MUST-NOT-APPEAR"
+	if _, err := FromEnv(func(k string) string { return confidentialEnv()[k] }); err != nil {
+		t.Fatalf("baseline confidential config: %v", err)
+	}
+	for _, name := range []string{"RECEIPT_SIGNING_SEED", "METER_SIGNING_SEED", "EHBP_IDENTITY_B64", "UPSTREAM_BEARER_TOKEN"} {
+		env := confidentialEnv()
+		env[name] = marker
+		_, err := FromEnv(func(k string) string { return env[k] })
+		if err == nil {
+			t.Errorf("%s accepted in confidential mode", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("refusal for %s does not name the variable: %v", name, err)
+		}
+		if strings.Contains(err.Error(), marker) {
+			t.Errorf("refusal for %s leaks the value: %v", name, err)
+		}
+		// Whitespace-only is treated as unset, not as a secret.
+		env[name] = "  "
+		if _, err := FromEnv(func(k string) string { return env[k] }); err != nil {
+			t.Errorf("blank %s refused: %v", name, err)
+		}
+	}
+}
+
+func TestConfidentialModeKeyDirAndTokenFileValidation(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]string){
+		"relative key dir":       func(e map[string]string) { e["ENCLAVE_KEY_DIR"] = "state/keys" },
+		"relative token file":    func(e map[string]string) { e["UPSTREAM_BEARER_TOKEN_FILE"] = "token" },
+		"key dir is replay dir":  func(e map[string]string) { e["ENCLAVE_KEY_DIR"] = e["ENTITLEMENT_REPLAY_DIR"] },
+		"key dir is outbox dir":  func(e map[string]string) { e["ENCLAVE_KEY_DIR"] = e["METER_OUTBOX_DIR"] },
+		"missing key dir":        func(e map[string]string) { delete(e, "ENCLAVE_KEY_DIR") },
+		"missing token file":     func(e map[string]string) { delete(e, "UPSTREAM_BEARER_TOKEN_FILE") },
+		"dev mode with enclave":  func(e map[string]string) { e["DEV_MODE"] = "1" },
+		"plaintext without EHBP": func(e map[string]string) { e["EHBP_REQUIRED"] = "0" },
+	} {
+		env := confidentialEnv()
+		mutate(env)
+		if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func TestConfidentialUpstreamAddress(t *testing.T) {
+	for _, ok := range []string{
+		"http://127.0.0.1:30000", "http://localhost:30000", "http://[::1]:30000",
+		"http://sglang:30000", "http://model-runtime-2:8000", "http://a:1",
+	} {
+		env := confidentialEnv()
+		env["UPSTREAM"] = ok
+		if _, err := FromEnv(func(k string) string { return env[k] }); err != nil {
+			t.Errorf("UPSTREAM=%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"http://sglang",                                // no explicit port
+		"https://sglang:30000",                         // only plain http on the internal network
+		"http://sglang.internal:30000",                 // dotted: resolvable outside the VM
+		"http://sglang.:30000",                         // trailing dot
+		"http://SGLang:30000",                          // not normalized
+		"http://10.0.0.2:30000",                        // address on some other network
+		"http://169.254.169.254:80",                    // metadata service
+		"http://-sglang:30000",                         // not a valid label
+		"http://2sglang:30000",                         // must start with a letter
+		"http://sg_lang:30000",                         // underscore
+		"http://example.com:30000",                     // public host
+		"http://" + strings.Repeat("a", 64) + ":30000", // label too long
+		"http://user@sglang:30000",                     // userinfo
+		"http://sglang:30000/v1",                       // path
+	} {
+		env := confidentialEnv()
+		env["UPSTREAM"] = bad
+		if _, err := FromEnv(func(k string) string { return env[k] }); err == nil {
+			t.Errorf("UPSTREAM=%q accepted in confidential mode", bad)
+		}
+	}
+}
+
+func TestLegacyModeKeepsEnvSecretsAndRejectsBothTokenSources(t *testing.T) {
+	seed := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	env := map[string]string{"RECEIPT_SIGNING_SEED": seed, "UPSTREAM_BEARER_TOKEN": "dev-token"}
+	cfg, err := FromEnv(noAuth(func(k string) string { return env[k] }))
+	if err != nil {
+		t.Fatalf("non-confidential seed config: %v", err)
+	}
+	if cfg.ReceiptSigningSeed != seed || cfg.UpstreamBearer != "dev-token" {
+		t.Error("development seed or token was not retained")
+	}
+	env["UPSTREAM_BEARER_TOKEN_FILE"] = "/run/upstream/token"
+	if _, err := FromEnv(noAuth(func(k string) string { return env[k] })); err == nil {
+		t.Error("both upstream token sources accepted")
 	}
 }

@@ -129,7 +129,6 @@ func TestConfidentialHarnessStreamEndToEnd(t *testing.T) {
 	cfg.MeterURL = bs.URL
 	cfg.MeterDeliveryMode = "direct-signed"
 	cfg.MeterIngressSecret = "test-ingress"
-	cfg.MeterSigningSeed = base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	cfg.MeterOutboxDir = t.TempDir()
 	cfg.EHBPRequired = true
 
@@ -217,6 +216,18 @@ func TestConfidentialHarnessStreamEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(forwarded, `"tool_calls"`) || !strings.Contains(forwarded, `"tool_choice":"auto"`) {
 		t.Errorf("tool-call fields did not survive the gate: %s", forwarded)
+	}
+	// Tenant cache isolation survives the EHBP path: the decrypted body that
+	// reaches the model always carries a proxy-derived cache_salt.
+	var forwardedDoc map[string]any
+	if err := json.Unmarshal([]byte(forwarded), &forwardedDoc); err != nil {
+		t.Fatalf("upstream body is not JSON: %v", err)
+	}
+	if salt, _ := forwardedDoc["cache_salt"].(string); len(salt) != 43 {
+		t.Errorf("upstream cache_salt = %q, want a 43-character HMAC-SHA256 value", forwardedDoc["cache_salt"])
+	}
+	if _, present := forwardedDoc["extra_key"]; present {
+		t.Error("upstream body carries extra_key")
 	}
 	if billing.starts.Load() != 1 {
 		t.Errorf("/cc/start calls = %d, want 1", billing.starts.Load())
